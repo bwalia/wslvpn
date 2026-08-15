@@ -1,0 +1,13 @@
+control:
+  url: "http://control:8080"
+  registration_token: "dev-gateway-token-change-me"
+  heartbeat_secs: 10
+
+gateway:
+  name: "compose-gateway"
+  endpoint: "gateway:51820"
+
+wireguard:
+  interface: "wg-wsl0"
+  manage_interface: false
+  state_dir: "/tmp/wsl-gateway"

@@ -1,0 +1,15 @@
+control:
+  url: "http://localhost:8080"
+  registration_token: "dev-gateway-token-change-me"
+  heartbeat_secs: 10
+
+gateway:
+  name: "local-gateway"
+  endpoint: "127.0.0.1:51820"
+  # network_id filled after control seeds development network; gateway will
+  # still register and can be updated via API/GitOps.
+
+wireguard:
+  interface: "wg-wsl0"
+  manage_interface: false
+  state_dir: "/tmp/wsl-gateway"

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WSL Zero Trust</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <section id="signed-out" class="panel">
+        <h1>WSL Zero Trust</h1>
+        <p>Secure access to your organisation's services</p>
+        <button id="sign-in">Sign in</button>
+      </section>
+      <section id="signed-in" class="panel hidden">
+        <header>
+          <h1>WSL Zero Trust <span id="dot" class="dot"></span></h1>
+        </header>
+        <p>Signed in as <strong id="email">—</strong></p>
+        <p>Device <strong id="device">—</strong><br /><span class="ok">✓ Trusted</span></p>
+        <h2>Networks</h2>
+        <ul id="networks"></ul>
+        <button id="disconnect">Disconnect All</button>
+      </section>
+    </main>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

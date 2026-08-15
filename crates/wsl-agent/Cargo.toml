@@ -1,0 +1,30 @@
+[package]
+name = "wsl-agent"
+description = "WSL Zero Trust VPN endpoint agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wsl-agent"
+path = "src/main.rs"
+
+[lib]
+name = "wsl_agent"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+wsl-crypto = { workspace = true }
+wsl-types = { workspace = true }
+dirs = "6"

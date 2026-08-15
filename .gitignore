@@ -1,0 +1,10 @@
+target/
+**/*.rs.bk
+.env
+*.pem
+*.key
+.DS_Store
+apps/wsl-desktop/node_modules/
+apps/wsl-desktop/dist/
+apps/wsl-desktop/src-tauri/target/
+deploy/compose/data/

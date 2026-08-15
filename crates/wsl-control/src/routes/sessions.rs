@@ -1,0 +1,37 @@
+use crate::auth::AuthUser;
+use crate::error::{AppError, AppResult};
+use crate::services::sessions::SessionService;
+use crate::state::AppState;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use uuid::Uuid;
+use wsl_types::{CreateSessionRequest, CreateSessionResponse, Session};
+
+pub async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<Session>>> {
+    Ok(Json(SessionService::new(state).list().await?))
+}
+
+pub async fn create(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<CreateSessionRequest>,
+) -> AppResult<Json<CreateSessionResponse>> {
+    Ok(Json(
+        SessionService::new(state)
+            .create(user.user_id, &user.email, body)
+            .await?,
+    ))
+}
+
+pub async fn revoke(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let ok = SessionService::new(state).revoke(id).await?;
+    if !ok {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "revoked": true })))
+}

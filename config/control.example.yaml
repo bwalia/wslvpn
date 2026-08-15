@@ -1,0 +1,32 @@
+server:
+  listen: "0.0.0.0:8080"
+  public_url: "http://localhost:8080"
+
+product:
+  namespace: wsl
+  display_name: "WSL Zero Trust VPN"
+
+database:
+  url: "postgres://wsl:wsl@localhost:5433/wsl"
+
+identity:
+  oidc:
+    issuer: "http://localhost:5556/dex"
+    client_id: "wsl-client"
+    client_secret: "wsl-client-secret"
+    scopes:
+      - openid
+      - profile
+      - email
+    redirect_uri: "http://localhost:8080/auth/oidc/callback"
+
+wireguard:
+  default_port: 51820
+
+gitops:
+  enabled: true
+  path: "./gitops/examples"
+
+bootstrap:
+  ops_service_token: "dev-ops-token-change-me"
+  gateway_registration_token: "dev-gateway-token-change-me"

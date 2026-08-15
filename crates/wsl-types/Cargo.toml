@@ -1,0 +1,13 @@
+[package]
+name = "wsl-types"
+description = "Shared API and domain types for WSL Zero Trust VPN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+uuid = { workspace = true }

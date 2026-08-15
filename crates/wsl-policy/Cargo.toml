@@ -1,0 +1,17 @@
+[package]
+name = "wsl-policy"
+description = "Policy-as-code compile and fail-closed evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+wsl-types = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

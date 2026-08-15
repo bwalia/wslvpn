@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wsl
+      POSTGRES_PASSWORD: wsl
+      POSTGRES_DB: wsl
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wsl -d wsl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./dex.yaml:/etc/dex/config.yaml:ro
+
+  control:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.control
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://wsl:wsl@postgres:5432/wsl
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./control.yaml:/etc/wsl/control.yaml:ro
+      - ../../gitops/examples:/gitops:ro
+    command: ["wsl-control", "--config", "/etc/wsl/control.yaml"]
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.gateway
+    depends_on:
+      - control
+    environment:
+      RUST_LOG: info
+    volumes:
+      - ./gateway.yaml:/etc/wsl/gateway.yaml:ro
+    command: ["wsl-gateway", "--config", "/etc/wsl/gateway.yaml"]
+    cap_add:
+      - NET_ADMIN
+    # manage_interface remains false in compose for portability
+
+volumes:
+  pgdata:

@@ -1,0 +1,10 @@
+name: development
+cidr: 10.88.0.0/24
+dns:
+  servers:
+    - 10.88.0.53
+  domains:
+    - internal.example.com
+routes:
+  - destination: 10.88.0.0/24
+    description: development overlay

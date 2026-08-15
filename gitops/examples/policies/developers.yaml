@@ -1,0 +1,17 @@
+apiVersion: wsl.io/v1
+kind: AccessPolicy
+metadata:
+  name: developers-development
+spec:
+  subjects:
+    groups:
+      - developers
+  resources:
+    - development
+  device:
+    managed: true
+    compliant: true
+  session:
+    duration: 8h
+  action:
+    connect: true

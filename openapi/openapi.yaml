@@ -1,0 +1,38 @@
+openapi: 3.0.3
+info:
+  title: WSL Zero Trust VPN API
+  version: 0.1.0
+  description: Control plane REST API (see also /api-docs/openapi.json from wsl-control)
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+  /api/v1/users:
+    get:
+      summary: List users
+      responses:
+        "200":
+          description: OK
+  /api/v1/sessions:
+    post:
+      summary: Create session
+      responses:
+        "200":
+          description: OK
+  /api/v1/ops/users:
+    post:
+      summary: OpsAPI create user
+      responses:
+        "200":
+          description: OK
+  /SCIM/v2/Users:
+    get:
+      summary: SCIM list users
+      responses:
+        "200":
+          description: OK
