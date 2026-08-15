@@ -26,6 +26,7 @@ use wsl_types::*;
         PolicyVersion,
         PolicyDecision,
         Session,
+        SessionIdentity,
         CreateSessionRequest,
         CreateSessionResponse,
         ClientWireGuardConfig,

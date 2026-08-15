@@ -5,11 +5,13 @@ use crate::services::ipam::IpamService;
 use crate::services::networks::NetworkService;
 use crate::state::{hash_token, AppState};
 use chrono::{DateTime, Duration, Utc};
+use ipnetwork::IpNetwork;
+use std::net::IpAddr;
 use uuid::Uuid;
 use wsl_policy::{evaluate, AccessPolicyDocument, EvaluationInput};
 use wsl_types::{
     ClientWireGuardConfig, CreateSessionRequest, CreateSessionResponse, PolicyDecision, Session,
-    SessionStatus,
+    SessionIdentity, SessionStatus,
 };
 
 pub struct SessionService {
@@ -231,6 +233,55 @@ impl SessionService {
                 persistent_keepalive: 25,
             },
         })
+    }
+
+    /// Resolve an overlay address to the identity behind it.
+    ///
+    /// Used by edge proxies to enforce per-user access on VPN-only endpoints.
+    /// Only active, unexpired sessions resolve: a revoked or expired session is
+    /// indistinguishable from an unknown address, so the caller denies either
+    /// way without needing to interpret status itself.
+    ///
+    /// The address is matched exactly against the allocation, so one client
+    /// cannot borrow another's identity by claiming a neighbouring address.
+    pub async fn identity_by_ip(&self, ip: IpAddr) -> AppResult<Option<SessionIdentity>> {
+        let host = IpNetwork::new(ip, if ip.is_ipv4() { 32 } else { 128 })
+            .map_err(|e| AppError::bad_request(e.to_string()))?;
+
+        let row: Option<(Uuid, Uuid, String, Uuid, IpNetwork, DateTime<Utc>)> = sqlx::query_as(
+            r#"
+            SELECT s.id, s.user_id, u.email, s.device_id, s.assigned_ip, s.expires_at
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.assigned_ip = $1
+              AND s.status = 'active'
+              AND s.expires_at > NOW()
+              AND u.active = TRUE
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(host)
+        .fetch_optional(&self.state.db)
+        .await?;
+
+        let Some((session_id, user_id, email, device_id, assigned_ip, expires_at)) = row else {
+            return Ok(None);
+        };
+
+        let groups = GroupService::new(self.state.clone())
+            .user_group_names(user_id)
+            .await?;
+
+        Ok(Some(SessionIdentity {
+            session_id,
+            user_id,
+            email,
+            device_id,
+            groups,
+            assigned_ip: assigned_ip.to_string(),
+            expires_at,
+        }))
     }
 
     pub async fn revoke(&self, session_id: Uuid) -> AppResult<bool> {
