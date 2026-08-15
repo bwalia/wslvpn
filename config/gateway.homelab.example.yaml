@@ -1,0 +1,43 @@
+# Adopt an existing WireGuard hub.
+#
+# The gateway runs as a sidecar on the hub host and manages ONLY the peers the
+# control plane owns. It never creates the interface, sets its listen port, or
+# writes its private key — all three already belong to the hub.
+#
+# Copy, fill in the four marked values, and start with manage_interface: false
+# to review the reconcile plan before allowing any change.
+
+control:
+  url: "https://control.internal.example.com"
+  registration_token: "CHANGE-ME"
+  heartbeat_secs: 15
+
+gateway:
+  name: "homelab-hub"
+  # Reachable by roaming clients — public DNS or DDNS name plus the hub's
+  # listen port. NOT the hub's LAN address.
+  endpoint: "vpn.example.com:51820"
+  # network_id filled after the zerotrust network is applied via GitOps.
+
+wireguard:
+  # The hub's existing interface.
+  interface: "wg0"
+
+  # Manage peers on an interface that already exists and already has peers.
+  adopt_existing: true
+
+  # The hub's own public key: `wg show wg0 public-key`.
+  # Required when adopt_existing is set; without it the gateway would generate
+  # a new keypair and overwrite the private key of every live peer.
+  public_key: "CHANGE-ME="
+
+  # Peers whose allowed-ips fall entirely inside this range are the control
+  # plane's to add and remove. Everything else on the interface — the existing
+  # hub peers in 10.8.0.0/24 — is reported as foreign and never touched.
+  managed_range: "10.8.1.0/24"
+
+  # Start false: logs the add/update/remove plan without changing the
+  # interface. Flip to true once the plan matches what you expect.
+  manage_interface: false
+
+  state_dir: "/var/lib/wsl-gateway"
