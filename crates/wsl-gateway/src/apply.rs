@@ -1,6 +1,8 @@
 use crate::config::GatewayConfigFile;
+use crate::firewall;
 use crate::wg::{self, ReconcilePlan};
 use anyhow::{Context, Result};
+use ipnetwork::IpNetwork;
 use std::process::Stdio;
 use tokio::process::Command;
 use wsl_types::GatewayConfig;
@@ -128,7 +130,7 @@ pub async fn apply_config(
         }
     }
 
-    apply_routes(config).await;
+    apply_firewall(config, managed.as_ref()).await;
 
     Ok(plan.desired_count())
 }
@@ -177,34 +179,52 @@ async fn ensure_interface(
     Ok(())
 }
 
-/// nftables allowlist (best-effort). Rules are checked before insertion so
-/// repeated config versions do not accumulate duplicates.
-async fn apply_routes(config: &GatewayConfig) {
-    for route in &config.routes {
-        if nft_rule_exists(route).await {
-            continue;
-        }
-        let _ = Command::new("nft")
-            .args([
-                "add", "rule", "inet", "filter", "forward", "ip", "daddr", route, "accept",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-    }
-}
+/// Apply the gateway's nftables policy: which services overlay clients may
+/// reach, with everything else from the overlay denied.
+///
+/// The whole ruleset is replaced atomically in a table the gateway owns, so
+/// rules cannot accumulate and the host's own firewall is never touched.
+async fn apply_firewall(config: &GatewayConfig, managed: Option<&IpNetwork>) {
+    let range = managed.map(|m| m.to_string());
+    let Some(script) = firewall::render(&config.services, &config.routes, range.as_deref()) else {
+        tracing::warn!("no managed range; skipping firewall policy");
+        return;
+    };
 
-async fn nft_rule_exists(route: &str) -> bool {
-    let output = Command::new("nft")
-        .args(["list", "chain", "inet", "filter", "forward"])
-        .output()
-        .await;
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|line| line.contains("daddr") && line.contains(route) && line.contains("accept")),
-        _ => false,
+    let child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let Ok(mut child) = child else {
+        tracing::warn!("nft unavailable; service restrictions not applied");
+        return;
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = stdin.write_all(script.as_bytes()).await {
+            tracing::warn!(error = %e, "failed writing nft ruleset");
+            return;
+        }
+        drop(stdin);
+    }
+
+    match child.wait_with_output().await {
+        Ok(out) if out.status.success() => {
+            tracing::info!(services = config.services.len(), "applied firewall policy");
+        }
+        Ok(out) => {
+            // Loud rather than silent: an unapplied ruleset means services the
+            // operator believes are restricted are not.
+            tracing::error!(
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "nft rejected the ruleset; service restrictions NOT applied"
+            );
+        }
+        Err(e) => tracing::error!(error = %e, "nft failed; service restrictions NOT applied"),
     }
 }
 

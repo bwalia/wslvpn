@@ -3,7 +3,8 @@ use crate::state::{hash_token, AppState};
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 use wsl_types::{
-    Gateway, GatewayConfig, GatewayHeartbeatRequest, GatewayPeer, RegisterGatewayRequest,
+    Gateway, GatewayConfig, GatewayHeartbeatRequest, GatewayPeer, GatewayService as ServiceEntry,
+    RegisterGatewayRequest, ServiceProtocol,
 };
 
 pub struct GatewayService {
@@ -178,6 +179,40 @@ impl GatewayService {
                 .fetch_all(&self.state.db)
                 .await?;
 
+        let service_rows: Vec<(String, ipnetwork::IpNetwork, String, Vec<i32>)> = sqlx::query_as(
+            r#"
+            SELECT name, destination, protocol, ports
+            FROM network_services WHERE network_id = $1 ORDER BY name
+            "#,
+        )
+        .bind(network_id)
+        .fetch_all(&self.state.db)
+        .await?;
+
+        let services: Vec<ServiceEntry> = service_rows
+            .into_iter()
+            .filter_map(|(name, destination, protocol, ports)| {
+                // A row the gateway cannot render is dropped rather than sent:
+                // an invalid rule makes nft reject the whole ruleset, which
+                // would leave every other service unrestricted.
+                let protocol = protocol.parse::<ServiceProtocol>().ok()?;
+                let ports: Vec<u16> = ports
+                    .into_iter()
+                    .filter_map(|p| u16::try_from(p).ok())
+                    .collect();
+                if ports.is_empty() {
+                    tracing::warn!(service = %name, "skipping service with no valid ports");
+                    return None;
+                }
+                Some(ServiceEntry {
+                    name,
+                    destination: destination.to_string(),
+                    protocol,
+                    ports,
+                })
+            })
+            .collect();
+
         Ok(GatewayConfig {
             version: gw.config_version,
             expires_at: Utc::now() + Duration::minutes(5),
@@ -185,6 +220,7 @@ impl GatewayService {
             private_network_cidr: cidr,
             peers,
             routes: routes.into_iter().map(|r| r.0.to_string()).collect(),
+            services,
         })
     }
 }

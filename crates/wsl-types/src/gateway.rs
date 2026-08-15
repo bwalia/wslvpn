@@ -33,6 +33,10 @@ pub struct GatewayConfig {
     pub private_network_cidr: String,
     pub peers: Vec<GatewayPeer>,
     pub routes: Vec<String>,
+    /// Non-HTTP services reachable from the overlay. Restricted at the gateway
+    /// because the edge proxy never sees this traffic.
+    #[serde(default)]
+    pub services: Vec<crate::network::GatewayService>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
