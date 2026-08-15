@@ -1,0 +1,17 @@
+# Zero Trust overlay carved alongside an existing WireGuard mesh.
+#
+# The hub's own peers live in 10.8.0.0/24 and are managed out of band. Sessions
+# issued by the control plane are allocated from this disjoint range, which is
+# also what scopes peer removal on the gateway (wireguard.managed_range).
+name: zerotrust
+cidr: 10.8.1.0/24
+dns:
+  servers:
+    - 10.8.0.1
+  domains:
+    - internal.example.com
+routes:
+  - destination: 10.8.1.0/24
+    description: zero trust client overlay
+  - destination: 10.8.0.0/24
+    description: existing mesh reachable from zero trust clients
