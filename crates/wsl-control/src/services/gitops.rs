@@ -111,6 +111,65 @@ impl GitOpsService {
                         .id
                 };
 
+                if let Some(services) = v.get("services").and_then(|s| s.as_sequence()) {
+                    for service in services {
+                        let (Some(name), Some(dest)) = (
+                            service.get("name").and_then(|n| n.as_str()),
+                            service.get("destination").and_then(|d| d.as_str()),
+                        ) else {
+                            return Err(AppError::bad_request(
+                                "service requires name and destination",
+                            ));
+                        };
+                        let protocol = service
+                            .get("protocol")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("tcp");
+                        let ports: Vec<i32> = service
+                            .get("ports")
+                            .and_then(|p| p.as_sequence())
+                            .map(|seq| {
+                                seq.iter()
+                                    .filter_map(|x| x.as_i64().map(|n| n as i32))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if ports.is_empty() {
+                            // Rejected rather than stored: a portless service
+                            // renders an invalid firewall rule, and nft failing
+                            // means nothing gets restricted.
+                            return Err(AppError::bad_request(format!(
+                                "service {name} requires at least one port"
+                            )));
+                        }
+                        let description = service
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .map(|s| s.to_string());
+                        sqlx::query(
+                            r#"
+                            INSERT INTO network_services
+                                (network_id, name, destination, protocol, ports, description)
+                            VALUES ($1, $2, $3::cidr, $4, $5, $6)
+                            ON CONFLICT (network_id, name) DO UPDATE SET
+                              destination = EXCLUDED.destination,
+                              protocol = EXCLUDED.protocol,
+                              ports = EXCLUDED.ports,
+                              description = EXCLUDED.description,
+                              updated_at = NOW()
+                            "#,
+                        )
+                        .bind(network_id)
+                        .bind(name)
+                        .bind(dest)
+                        .bind(protocol)
+                        .bind(&ports)
+                        .bind(description)
+                        .execute(&self.state.db)
+                        .await?;
+                    }
+                }
+
                 if let Some(routes) = v.get("routes").and_then(|r| r.as_sequence()) {
                     for route in routes {
                         if let Some(dest) = route.get("destination").and_then(|d| d.as_str()) {

@@ -1,5 +1,6 @@
 mod apply;
 mod config;
+mod firewall;
 mod wg;
 
 use anyhow::Context;

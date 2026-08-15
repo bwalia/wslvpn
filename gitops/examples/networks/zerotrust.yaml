@@ -15,3 +15,24 @@ routes:
     description: zero trust client overlay
   - destination: 10.8.0.0/24
     description: existing mesh reachable from zero trust clients
+
+# Non-HTTP services reachable from the overlay. The edge proxy never sees this
+# traffic, so it is restricted by the gateway firewall instead of proxy rules.
+#
+# Anything from the overlay NOT listed here (or under routes above) is dropped.
+services:
+  - name: postgres
+    destination: 10.8.0.20/32
+    protocol: tcp
+    ports: [5432]
+    description: primary database
+  - name: ssh-bastion
+    destination: 10.8.0.30/32
+    protocol: tcp
+    ports: [22]
+    description: jump host
+  - name: redis
+    destination: 10.8.0.40/32
+    protocol: tcp
+    ports: [6379]
+    description: cache
