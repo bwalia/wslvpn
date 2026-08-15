@@ -41,6 +41,20 @@ pub struct CreateSessionResponse {
     pub wireguard: ClientWireGuardConfig,
 }
 
+/// Identity behind an overlay address, for edge proxies enforcing per-user
+/// access. Deliberately minimal: enough to authorise a request, nothing that
+/// would turn the proxy's cache into a copy of the directory.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SessionIdentity {
+    pub session_id: Uuid,
+    pub user_id: Uuid,
+    pub email: String,
+    pub device_id: Uuid,
+    pub groups: Vec<String>,
+    pub assigned_ip: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ClientWireGuardConfig {
     pub interface_address: String,

@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/policies", get(policies::list))
         .route("/policies/apply", post(policies::apply))
         .route("/sessions", get(sessions::list).post(sessions::create))
+        .route("/sessions/by-ip/{ip}", get(sessions::identity_by_ip))
         .route("/sessions/{id}", delete(sessions::revoke))
         .route("/gateways", get(gateways::list))
         .route("/gateways/register", post(gateways::register))
