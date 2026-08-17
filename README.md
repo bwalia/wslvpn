@@ -30,6 +30,7 @@ cargo run -p wsl-cli -- status
 
 ## Documentation
 
+- [How it works](docs/HOW-IT-WORKS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security](docs/SECURITY.md)
 - [Threat model](docs/THREAT-MODEL.md)
