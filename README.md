@@ -66,6 +66,7 @@ database, so `make test` brings a throwaway PostgreSQL up first.
 - [GitOps](docs/GITOPS.md)
 - [API](docs/API.md)
 - [OpsAPI integration](docs/OPSAPI.md) · [SCIM](docs/SCIM.md) · [OIDC](docs/OIDC.md)
+- [Decisions](docs/decisions/)
 
 ## License
 

@@ -59,7 +59,8 @@ than one they know is missing:
   privilege can disable those triggers. What they cannot do is leave the chain
   verifying afterwards. Ship audit events off-box for prevention.
 - **Single-tenant.** There is no organisation boundary in the schema. One
-  deployment serves one organisation.
+  deployment serves one organisation — a deliberate choice, recorded in
+  [decisions/0001](decisions/0001-single-tenant-deployments.md).
 - **`X-Forwarded-For` is not trusted.** The rate limiter keys on the peer
   address only; honouring the header by default would let one client spread
   attempts across unlimited synthetic keys.
