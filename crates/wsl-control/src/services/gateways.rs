@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::services::audit::AuditService;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::state::{constant_time_eq, generate_token, hash_token, AppState};
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
@@ -169,19 +169,15 @@ impl GatewayService {
         let gateway = map_gw(row);
         AuditService::new(self.state.clone())
             .record(
-                "gateway.enrolled",
-                Some("allow"),
-                None,
-                None,
-                Some(&gateway.name),
-                None,
-                None,
-                None,
-                serde_json::json!({
-                    "gateway_id": gateway.id,
-                    "endpoint": gateway.endpoint,
-                    "re_enrollment": existing.is_some(),
-                }),
+                AuditEntry::new("gateway.enrolled")
+                    .decision("allow")
+                    .by_gateway(gateway.id)
+                    .resource(&gateway.name)
+                    .details(serde_json::json!({
+                        "endpoint": gateway.endpoint,
+                        "public_key": gateway.public_key,
+                        "re_enrollment": existing.is_some(),
+                    })),
             )
             .await?;
 
@@ -213,15 +209,10 @@ impl GatewayService {
         };
         AuditService::new(self.state.clone())
             .record(
-                "gateway.token_rotated",
-                Some("allow"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                serde_json::json!({ "gateway_id": gateway_id }),
+                AuditEntry::new("gateway.token_rotated")
+                    .decision("allow")
+                    .by_gateway(gateway_id)
+                    .details(serde_json::json!({ "rotated_at": rotated_at })),
             )
             .await?;
         Ok(Some(RotateGatewayTokenResponse {

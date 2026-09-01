@@ -65,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/gateways/{id}/heartbeat", post(gateways::heartbeat))
         .route("/gateways/{id}/rotate-token", post(gateways::rotate_token))
         .route("/audit", get(audit::list))
+        .route("/audit/verify", get(audit::verify))
         .route("/gitops/apply", post(gitops::apply))
         .nest("/ops", ops::router());
 

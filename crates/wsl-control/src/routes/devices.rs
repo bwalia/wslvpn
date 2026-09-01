@@ -1,5 +1,6 @@
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::devices::DeviceService;
 use crate::state::AppState;
 use axum::{
@@ -54,11 +55,21 @@ pub async fn revoke(
     caller: AuthUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let svc = DeviceService::new(state);
+    let svc = DeviceService::new(state.clone());
     let device = svc.get(id).await?.ok_or(AppError::NotFound)?;
     caller.authorize_owner(device.user_id)?;
     if !svc.revoke(id).await? {
         return Err(AppError::NotFound);
     }
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("device.revoke")
+                .decision("allow")
+                .by_user(caller.user_id, &caller.email)
+                .subject(device.user_id)
+                .device(id)
+                .resource(&device.name),
+        )
+        .await?;
     Ok(Json(serde_json::json!({ "revoked": true })))
 }

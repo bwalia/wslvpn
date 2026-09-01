@@ -1,5 +1,6 @@
 use crate::auth::AdminUser;
 use crate::error::AppResult;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::gitops::GitOpsService;
 use crate::state::AppState;
 use axum::{extract::State, Json};
@@ -18,12 +19,22 @@ pub struct ApplyGitOpsRequest {
 /// host's filesystem.
 pub async fn apply(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<ApplyGitOpsRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let path = state.config.gitops.path.clone();
-    let n = GitOpsService::new(state)
+    let n = GitOpsService::new(state.clone())
         .apply_directory(&path, body.git_commit.as_deref())
+        .await?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("gitops.apply")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .resource(&path)
+                .git_commit(body.git_commit.as_deref())
+                .details(serde_json::json!({ "applied_policies": n })),
+        )
         .await?;
     Ok(Json(
         serde_json::json!({ "applied_policies": n, "path": path }),

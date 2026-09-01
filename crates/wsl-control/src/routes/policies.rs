@@ -1,5 +1,6 @@
 use crate::auth::AdminUser;
 use crate::error::AppResult;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::gitops::GitOpsService;
 use crate::state::AppState;
 use axum::{extract::State, Json};
@@ -23,12 +24,20 @@ pub struct ApplyPolicyRequest {
 
 pub async fn apply(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<ApplyPolicyRequest>,
 ) -> AppResult<Json<PolicyVersion>> {
-    Ok(Json(
-        GitOpsService::new(state)
-            .apply_policy_yaml(&body.yaml, body.git_commit.as_deref())
-            .await?,
-    ))
+    let version = GitOpsService::new(state.clone())
+        .apply_policy_yaml(&body.yaml, body.git_commit.as_deref())
+        .await?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("policy.apply")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .policy(version.policy_id, version.version)
+                .git_commit(body.git_commit.as_deref()),
+        )
+        .await?;
+    Ok(Json(version))
 }

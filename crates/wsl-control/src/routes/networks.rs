@@ -1,5 +1,6 @@
 use crate::auth::{AdminUser, AuthUser};
 use crate::error::{AppError, AppResult};
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::networks::NetworkService;
 use crate::state::AppState;
 use axum::{
@@ -30,8 +31,18 @@ pub async fn get(
 
 pub async fn create(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<CreateNetworkRequest>,
 ) -> AppResult<Json<Network>> {
-    Ok(Json(NetworkService::new(state).create(body).await?))
+    let network = NetworkService::new(state.clone()).create(body).await?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("network.create")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .resource(&network.name)
+                .details(serde_json::json!({ "cidr": network.cidr })),
+        )
+        .await?;
+    Ok(Json(network))
 }

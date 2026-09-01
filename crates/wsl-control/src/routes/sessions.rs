@@ -1,6 +1,7 @@
 use crate::auth::service_token::OpsAuth;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::sessions::SessionService;
 use crate::state::AppState;
 use axum::{
@@ -66,11 +67,20 @@ pub async fn revoke(
     caller: AuthUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let svc = SessionService::new(state);
+    let svc = SessionService::new(state.clone());
     let owner = svc.owner_of(id).await?.ok_or(AppError::NotFound)?;
     caller.authorize_owner(owner)?;
     if !svc.revoke(id).await? {
         return Err(AppError::NotFound);
     }
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("session.revoke")
+                .decision("allow")
+                .by_user(caller.user_id, &caller.email)
+                .subject(owner)
+                .resource(id.to_string()),
+        )
+        .await?;
     Ok(Json(serde_json::json!({ "revoked": true })))
 }

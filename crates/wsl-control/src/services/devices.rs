@@ -166,15 +166,14 @@ impl DeviceService {
 
         crate::services::audit::AuditService::new(self.state.clone())
             .record(
-                "device.register",
-                Some("allow"),
-                Some(user_id),
-                Some(device.id),
-                None,
-                None,
-                None,
-                None,
-                serde_json::json!({ "platform": device.platform }),
+                crate::services::audit::AuditEntry::new("device.register")
+                    .decision("allow")
+                    .subject(user_id)
+                    .device(device.id)
+                    .details(serde_json::json!({
+                        "platform": device.platform,
+                        "name": device.name,
+                    })),
             )
             .await?;
 

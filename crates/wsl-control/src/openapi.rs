@@ -39,6 +39,7 @@ use wsl_types::*;
         GatewayPeer,
         GatewayHeartbeatRequest,
         AuditEvent,
+        ActorType,
         PostureSignal,
         PostureResult,
         SessionStatus,

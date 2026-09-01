@@ -1,5 +1,6 @@
 use crate::auth::{AdminUser, AuthUser};
 use crate::error::{AppError, AppResult};
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::users::UserService;
 use crate::state::AppState;
 use axum::{
@@ -29,10 +30,20 @@ pub async fn get(
 
 pub async fn create(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<User>> {
-    Ok(Json(UserService::new(state).create(body).await?))
+    let user = UserService::new(state.clone()).create(body).await?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.create")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .subject(user.id)
+                .resource(&user.email),
+        )
+        .await?;
+    Ok(Json(user))
 }
 
 pub async fn update(
@@ -51,11 +62,26 @@ pub async fn update(
             "an administrator cannot demote or disable their own account",
         ));
     }
-    UserService::new(state)
+    let changes = serde_json::json!({
+        "display_name": body.display_name,
+        "active": body.active,
+        "role": body.role,
+    });
+    let updated = UserService::new(state.clone())
         .update(id, body)
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.update")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .subject(updated.id)
+                .resource(&updated.email)
+                .details(changes),
+        )
+        .await?;
+    Ok(Json(updated))
 }
 
 pub async fn delete(
@@ -68,9 +94,19 @@ pub async fn delete(
             "an administrator cannot delete their own account",
         ));
     }
-    let ok = UserService::new(state).delete(id).await?;
-    if !ok {
+    let svc = UserService::new(state.clone());
+    let target = svc.get(id).await?.ok_or(AppError::NotFound)?;
+    if !svc.delete(id).await? {
         return Err(AppError::NotFound);
     }
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.delete")
+                .decision("allow")
+                .by_user(admin.user_id, &admin.email)
+                .subject(id)
+                .resource(&target.email),
+        )
+        .await?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

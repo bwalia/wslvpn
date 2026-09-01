@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::services::audit::AuditService;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::gitops::GitOpsService;
 use anyhow::Context;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -126,15 +126,11 @@ impl AppState {
 
         AuditService::new(self.clone())
             .record(
-                "control.bootstrap",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                serde_json::json!({}),
+                AuditEntry::new("control.bootstrap").details(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "gitops_enabled": self.config.gitops.enabled,
+                    "dev_login_enabled": self.config.identity.dev_login_enabled,
+                })),
             )
             .await?;
 

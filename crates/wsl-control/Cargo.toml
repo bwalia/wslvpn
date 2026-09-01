@@ -49,5 +49,6 @@ wsl-types = { workspace = true }
 ipnetwork = "0.20"
 
 [dev-dependencies]
+futures = "0.3"
 http-body-util = "0.1"
 tower = { workspace = true, features = ["util"] }
