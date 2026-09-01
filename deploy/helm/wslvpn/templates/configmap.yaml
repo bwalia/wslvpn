@@ -1,0 +1,68 @@
+{{/*
+The control plane's config file. Secrets appear only as ${VAR} references and
+are resolved from the environment at startup — an unset variable is a startup
+error, so a missing secret fails loudly instead of becoming an empty password.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "wslvpn.fullname" . }}
+  labels:
+    {{- include "wslvpn.labels" . | nindent 4 }}
+data:
+  control.yaml: |
+    server:
+      listen: "0.0.0.0:8080"
+      public_url: {{ .Values.config.publicUrl | quote }}
+      expose_docs: {{ .Values.config.exposeDocs }}
+
+    product:
+      namespace: {{ .Values.config.productNamespace | quote }}
+      display_name: {{ .Values.config.productDisplayName | quote }}
+
+    database:
+      url: "${{ "{" }}{{ .Values.secrets.keys.databaseUrl }}{{ "}" }}"
+      max_connections: {{ .Values.config.database.maxConnections }}
+      min_connections: {{ .Values.config.database.minConnections }}
+      acquire_timeout_secs: {{ .Values.config.database.acquireTimeoutSecs }}
+      idle_timeout_secs: {{ .Values.config.database.idleTimeoutSecs }}
+      max_lifetime_secs: {{ .Values.config.database.maxLifetimeSecs }}
+
+    identity:
+      dev_login_enabled: false
+      oidc:
+        issuer: {{ .Values.config.oidc.issuer | quote }}
+        client_id: {{ .Values.config.oidc.clientId | quote }}
+        client_secret: "${{ "{" }}{{ .Values.secrets.keys.oidcClientSecret }}{{ "}" }}"
+        scopes:
+          {{- range .Values.config.oidc.scopes }}
+          - {{ . }}
+          {{- end }}
+        redirect_uri: "{{ .Values.config.publicUrl }}/auth/oidc/callback"
+
+    wireguard:
+      default_port: {{ .Values.config.wireguard.defaultPort }}
+
+    gitops:
+      enabled: {{ .Values.config.gitops.enabled }}
+      path: {{ .Values.config.gitops.path | quote }}
+
+    security:
+      rate_limit:
+        auth:
+          enabled: {{ .Values.config.rateLimit.auth.enabled }}
+          requests: {{ .Values.config.rateLimit.auth.requests }}
+          window_secs: {{ .Values.config.rateLimit.auth.windowSecs }}
+        api:
+          enabled: {{ .Values.config.rateLimit.api.enabled }}
+          requests: {{ .Values.config.rateLimit.api.requests }}
+          window_secs: {{ .Values.config.rateLimit.api.windowSecs }}
+
+    bootstrap:
+      ops_service_token: "${{ "{" }}{{ .Values.secrets.keys.opsServiceToken }}{{ "}" }}"
+      gateway_registration_token: "${{ "{" }}{{ .Values.secrets.keys.gatewayRegistrationToken }}{{ "}" }}"
+      scim_service_token: "${{ "{" }}{{ .Values.secrets.keys.scimServiceToken }}{{ "}" }}"
+      admin_emails:
+        {{- range .Values.config.adminEmails }}
+        - {{ . | quote }}
+        {{- end }}

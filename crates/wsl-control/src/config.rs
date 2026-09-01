@@ -183,8 +183,9 @@ const PLACEHOLDER_SECRETS: &[&str] = &[
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-        let expanded = expand_env(&raw)?;
-        let cfg: Self = serde_yaml::from_str(&expanded)?;
+        let mut document: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+        expand_env_in_document(&mut document)?;
+        let cfg: Self = serde_yaml::from_value(document)?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -253,6 +254,35 @@ impl Config {
     }
 }
 
+/// Expand `${VAR}` in every string in a parsed document.
+///
+/// Substitution happens after parsing rather than over the raw text, so a
+/// `${...}` written inside a YAML comment — which is exactly where a config
+/// file explains that the feature exists — is not treated as a reference to a
+/// variable nobody set.
+pub fn expand_env_in_document(value: &mut serde_yaml::Value) -> Result<()> {
+    match value {
+        serde_yaml::Value::String(s) => {
+            if s.contains("${") {
+                *s = expand_env(s)?;
+            }
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for item in items {
+                expand_env_in_document(item)?;
+            }
+        }
+        serde_yaml::Value::Mapping(map) => {
+            // Keys are field names, never secrets; only values are expanded.
+            for (_, v) in map.iter_mut() {
+                expand_env_in_document(v)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Replace `${VAR}` with the environment variable's value.
 ///
 /// Lets a deployment keep secrets in the process environment — or in whatever
@@ -315,5 +345,32 @@ mod tests {
     fn document_without_placeholders_is_unchanged() {
         let raw = "server:\n  listen: 0.0.0.0:8080\n";
         assert_eq!(expand_env(raw).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_placeholder_inside_a_comment_is_not_a_reference() {
+        // A config file that documents the ${VAR} feature in a comment must not
+        // fail to load because the example variable does not exist.
+        std::env::set_var("WSL_TEST_REAL", "real-value");
+        let raw = "# secrets may be written as ${NOT_SET_ANYWHERE}\ntoken: ${WSL_TEST_REAL}\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(raw).unwrap();
+        expand_env_in_document(&mut doc).unwrap();
+        assert_eq!(doc["token"], serde_yaml::Value::String("real-value".into()));
+    }
+
+    #[test]
+    fn expansion_reaches_into_sequences_and_nested_mappings() {
+        std::env::set_var("WSL_TEST_NESTED", "deep");
+        let raw = "outer:\n  inner:\n    - ${WSL_TEST_NESTED}\n    - plain\n";
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(raw).unwrap();
+        expand_env_in_document(&mut doc).unwrap();
+        assert_eq!(
+            doc["outer"]["inner"][0],
+            serde_yaml::Value::String("deep".into())
+        );
+        assert_eq!(
+            doc["outer"]["inner"][1],
+            serde_yaml::Value::String("plain".into())
+        );
     }
 }

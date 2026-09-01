@@ -38,7 +38,7 @@ services:
     volumes:
       - ./control.yaml:/etc/wsl/control.yaml:ro
       - ../../gitops/examples:/gitops:ro
-    command: ["wsl-control", "--config", "/etc/wsl/control.yaml"]
+    command: ["--config", "/etc/wsl/control.yaml"]
 
   gateway:
     build:
@@ -50,7 +50,7 @@ services:
       RUST_LOG: info
     volumes:
       - ./gateway.yaml:/etc/wsl/gateway.yaml:ro
-    command: ["wsl-gateway", "--config", "/etc/wsl/gateway.yaml"]
+    command: ["--config", "/etc/wsl/gateway.yaml"]
     cap_add:
       - NET_ADMIN
     # manage_interface remains false in compose for portability

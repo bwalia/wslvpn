@@ -1,0 +1,161 @@
+# Control plane deployment values.
+#
+# The chart deploys the control plane only. Gateways sit on the network paths
+# they serve rather than in the cluster, and PostgreSQL is expected to be a
+# managed service with its own backups — see docs/OPERATIONS.md.
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/bwalia/wsl-control
+  tag: ""          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Defaults are the restricted Pod Security Standard: no root, no privilege
+# escalation, no capabilities, read-only root filesystem.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # The control plane speaks plain HTTP and must never be reachable without
+    # TLS in front of it. Session bearer tokens travel on these requests.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  host: vpn.example.com
+  tls:
+    enabled: true
+    secretName: wslvpn-tls
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit: throttling a request-serving process adds tail latency
+    # without protecting anything the memory limit does not already protect.
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Keep a quorum serving during voluntary disruption (node drain, cluster
+# upgrade). With replicaCount 3 this permits one pod down at a time.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Deny-by-default egress and ingress. The control plane needs to reach
+# PostgreSQL and the OIDC issuer, and nothing else.
+networkPolicy:
+  enabled: true
+  # Namespaces permitted to call the control plane, by label selector.
+  allowedIngressNamespaces: []
+  postgres:
+    port: 5432
+  # CIDRs the OIDC issuer resolves to; narrow these to your IdP.
+  identityEgressCIDRs:
+    - 0.0.0.0/0
+
+nodeSelector: {}
+tolerations: []
+
+# Spread replicas across nodes and zones so a single failure cannot take the
+# control plane down. Sessions in progress survive a control-plane outage, but
+# no new ones can be established while it is down.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: wslvpn
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: wslvpn
+
+# Secrets are referenced, never templated into the chart. Create the Secret out
+# of band (sealed-secrets, External Secrets Operator, a vault injector) with
+# these keys; the config file reads them as ${VAR} at startup and refuses to
+# start if one is missing.
+secrets:
+  existingSecret: wslvpn-secrets
+  keys:
+    databaseUrl: WSL_DATABASE_URL
+    oidcClientSecret: WSL_OIDC_CLIENT_SECRET
+    opsServiceToken: WSL_OPS_SERVICE_TOKEN
+    gatewayRegistrationToken: WSL_GATEWAY_REGISTRATION_TOKEN
+    scimServiceToken: WSL_SCIM_SERVICE_TOKEN
+
+config:
+  publicUrl: https://vpn.example.com
+  # Enumerates every route and schema; leave off outside development.
+  exposeDocs: false
+  productNamespace: wsl
+  productDisplayName: WSL Zero Trust VPN
+  oidc:
+    issuer: https://idp.example.com
+    clientId: wslvpn
+    scopes: [openid, profile, email]
+  wireguard:
+    defaultPort: 51820
+  gitops:
+    enabled: false
+    path: /etc/wsl/gitops
+  database:
+    maxConnections: 25
+    minConnections: 5
+    acquireTimeoutSecs: 5
+    idleTimeoutSecs: 300
+    maxLifetimeSecs: 1800
+  # Enforced per replica, so the effective budget is this multiplied by
+  # replicaCount. Put a shared limiter at the ingress if you need a global one.
+  rateLimit:
+    auth:
+      enabled: true
+      requests: 20
+      windowSecs: 60
+    api:
+      enabled: true
+      requests: 600
+      windowSecs: 60
+  # Reconciled on every start: adding an address grants the admin role,
+  # removing one takes it away. An empty list on a fresh database means nobody
+  # can administer the deployment.
+  adminEmails: []
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
