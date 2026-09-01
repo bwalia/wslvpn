@@ -1,0 +1,23 @@
+# cargo-audit configuration.
+#
+# cargo-audit reads Cargo.lock, which records a crate's *optional* dependencies
+# whether or not the enabled feature set compiles them. An advisory ignored here
+# must therefore be justified by evidence that the crate is not built, and that
+# evidence has to be re-checked whenever the dependency graph changes.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 - Marvin attack in `rsa`, no fixed version available.
+    #
+    # `rsa` reaches Cargo.lock only through `sqlx-mysql`. This workspace builds
+    # sqlx with default-features = false and the `postgres` driver only, so
+    # sqlx-mysql is never compiled and no RSA code is linked into any binary.
+    #
+    # Verify with:
+    #   cargo tree --invert --package rsa            # "nothing to print"
+    #   cargo build --workspace 2>&1 | grep mysql    # no output
+    #
+    # Revisit if a MySQL driver is ever enabled, or if `rsa` publishes a fix.
+    # Last checked: 2026-09-01.
+    "RUSTSEC-2023-0071",
+]

@@ -4,7 +4,13 @@
 # Any unfixed advisory against a dependency fails the build. Exceptions belong
 # in `ignore` with a dated justification, not in a relaxed default.
 yanked = "deny"
-ignore = []
+ignore = [
+    # See .cargo/audit.toml for the full justification: `rsa` is present in
+    # Cargo.lock via sqlx-mysql, which this workspace never compiles - sqlx is
+    # built with default-features = false and the postgres driver only.
+    # No fixed version exists upstream. Last checked: 2026-09-01.
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 # Permissive licences only. A copyleft dependency arriving transitively is a

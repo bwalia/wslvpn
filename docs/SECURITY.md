@@ -16,7 +16,7 @@ Security is prioritized over convenience.
 | Audit | Append-only, hash-chained, attributed to the acting principal |
 | Rate limiting | Fixed-window per client on credential-checking endpoints |
 | Secrets | `${VAR}` from the environment; example values refused on non-loopback deployments |
-| Supply chain | `cargo audit` and `cargo deny` as blocking gates; CycloneDX SBOM; cosign-signed image digests |
+| Supply chain | `cargo audit` and `cargo deny` as blocking gates, with every exception justified and dated in `.cargo/audit.toml`; CycloneDX SBOM; cosign-signed image digests |
 | Containers | Control plane is distroless nonroot, read-only root, no capabilities |
 | Logs | No secrets; failed authorization logged with path and principal |
 | Gateway privilege | `CAP_NET_ADMIN` only, and only on the gateway |

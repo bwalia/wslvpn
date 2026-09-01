@@ -58,6 +58,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
+      # Exceptions live in .cargo/audit.toml, each with the evidence that the
+      # advisory does not reach a compiled binary and the date it was checked.
       - name: audit
         run: cargo audit --deny warnings
 
