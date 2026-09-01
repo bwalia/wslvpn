@@ -1,6 +1,7 @@
 server:
   listen: "0.0.0.0:8080"
   public_url: "http://localhost:8080"
+  expose_docs: true
 
 product:
   namespace: wsl
@@ -10,6 +11,7 @@ database:
   url: "postgres://wsl:wsl@postgres:5432/wsl"
 
 identity:
+  dev_login_enabled: true
   oidc:
     issuer: "http://dex:5556/dex"
     client_id: "wsl-client"
@@ -30,3 +32,6 @@ gitops:
 bootstrap:
   ops_service_token: "dev-ops-token-change-me"
   gateway_registration_token: "dev-gateway-token-change-me"
+  scim_service_token: "dev-scim-token-change-me"
+  admin_emails:
+    - "alice@example.com"

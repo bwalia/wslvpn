@@ -54,6 +54,10 @@ async fn disable_user(
             UpdateUserRequest {
                 display_name: None,
                 active: Some(false),
+                // Enabling and disabling is an account-lifecycle action.
+                // Granting the admin role is not, and a provisioning token
+                // must not be a path to one.
+                role: None,
             },
         )
         .await?
@@ -72,6 +76,7 @@ async fn enable_user(
             UpdateUserRequest {
                 display_name: None,
                 active: Some(true),
+                role: None,
             },
         )
         .await?

@@ -212,9 +212,13 @@ pub async fn dev_login(
     State(state): State<AppState>,
     Json(body): Json<DevLoginRequest>,
 ) -> AppResult<Json<TokenResponse>> {
-    if !state.config.server.public_url.contains("localhost")
-        && !state.config.server.public_url.contains("127.0.0.1")
-    {
+    // Two independent gates. The explicit flag is the real control — a
+    // deployment must opt in — and the loopback check is a backstop so that
+    // turning the flag on by accident still cannot expose a public host. The
+    // config validator also refuses to start a non-loopback deployment with
+    // the flag set, so this is the third of three.
+    if !state.config.identity.dev_login_enabled || !state.config.is_local() {
+        tracing::warn!("denied: dev login is disabled");
         return Err(AppError::Forbidden);
     }
     let user_id = upsert_user(&state, &body.email).await?;

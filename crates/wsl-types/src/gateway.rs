@@ -25,6 +25,25 @@ pub struct RegisterGatewayRequest {
     pub token: String,
 }
 
+/// Answer to a successful enrollment.
+///
+/// `auth_token` is the only time the control plane will ever disclose the
+/// gateway's credential; it is stored hashed and cannot be read back. The
+/// gateway persists it and presents it on every config and heartbeat call.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RegisterGatewayResponse {
+    #[serde(flatten)]
+    pub gateway: Gateway,
+    pub auth_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RotateGatewayTokenResponse {
+    pub gateway_id: Uuid,
+    pub auth_token: String,
+    pub rotated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GatewayConfig {
     pub version: i64,

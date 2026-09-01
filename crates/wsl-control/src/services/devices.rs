@@ -40,6 +40,35 @@ impl DeviceService {
         Ok(rows.into_iter().map(map_device).collect())
     }
 
+    /// Devices belonging to one user, for a member reading their own.
+    pub async fn list_for_user(&self, user_id: Uuid) -> AppResult<Vec<Device>> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Uuid,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                bool,
+                DateTime<Utc>,
+                DateTime<Utc>,
+            ),
+        >(
+            r#"
+            SELECT id, user_id, name, platform, os_version, agent_version,
+                   wireguard_public_key, revoked, created_at, updated_at
+            FROM devices WHERE user_id = $1 ORDER BY created_at DESC
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.state.db)
+        .await?;
+        Ok(rows.into_iter().map(map_device).collect())
+    }
+
     pub async fn get(&self, id: Uuid) -> AppResult<Option<Device>> {
         let row = sqlx::query_as::<
             _,

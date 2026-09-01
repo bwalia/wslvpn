@@ -28,6 +28,21 @@ impl SessionService {
         Ok(rows)
     }
 
+    /// Sessions belonging to one user, for a member reading their own.
+    pub async fn list_for_user(&self, user_id: Uuid) -> AppResult<Vec<Session>> {
+        self.fetch_sessions(Some(user_id)).await
+    }
+
+    /// Who owns a session, for ownership checks before revocation.
+    pub async fn owner_of(&self, session_id: Uuid) -> AppResult<Option<Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT user_id FROM sessions WHERE id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.state.db)
+                .await?,
+        )
+    }
+
     pub async fn create(
         &self,
         user_id: Uuid,

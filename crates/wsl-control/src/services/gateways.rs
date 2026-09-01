@@ -1,10 +1,11 @@
 use crate::error::{AppError, AppResult};
-use crate::state::{hash_token, AppState};
+use crate::services::audit::AuditService;
+use crate::state::{constant_time_eq, generate_token, hash_token, AppState};
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 use wsl_types::{
     Gateway, GatewayConfig, GatewayHeartbeatRequest, GatewayPeer, GatewayService as ServiceEntry,
-    RegisterGatewayRequest, ServiceProtocol,
+    RegisterGatewayRequest, RegisterGatewayResponse, RotateGatewayTokenResponse, ServiceProtocol,
 };
 
 pub struct GatewayService {
@@ -63,18 +64,72 @@ impl GatewayService {
         Ok(row.map(map_gw))
     }
 
-    pub async fn register(&self, req: RegisterGatewayRequest) -> AppResult<Gateway> {
+    /// Enroll a gateway and mint its credential.
+    ///
+    /// `presented_auth` is the bearer credential the caller supplied, if any.
+    /// A first enrollment needs only the shared enrollment secret; re-enrolling
+    /// a name that already exists additionally requires that gateway's current
+    /// credential. Without the second check, the shared secret alone would let
+    /// anyone overwrite a live gateway's `endpoint` and pull its traffic to a
+    /// host they control.
+    pub async fn register(
+        &self,
+        req: RegisterGatewayRequest,
+        presented_auth: Option<&str>,
+    ) -> AppResult<RegisterGatewayResponse> {
         let expected = hash_token(&self.state.config.bootstrap.gateway_registration_token);
-        if hash_token(&req.token) != expected {
+        if !constant_time_eq(&hash_token(&req.token), &expected) {
+            tracing::warn!(gateway = %req.name, "denied: bad gateway enrollment secret");
             return Err(AppError::Unauthorized);
         }
-        let token_hash = hash_token(&req.token);
-        let mut network_id = req.network_id;
-        if network_id.is_none() {
-            network_id = sqlx::query_scalar("SELECT id FROM networks WHERE name = 'development'")
+
+        let existing: Option<(Uuid, Option<String>)> =
+            sqlx::query_as("SELECT id, auth_token_hash FROM gateways WHERE name = $1")
+                .bind(&req.name)
                 .fetch_optional(&self.state.db)
                 .await?;
+
+        if let Some((existing_id, existing_hash)) = &existing {
+            let proved = match (presented_auth, existing_hash) {
+                (Some(token), Some(hash)) => constant_time_eq(&hash_token(token), hash),
+                // A gateway enrolled before per-gateway credentials existed has
+                // no hash to prove against. Re-enrollment is allowed once so it
+                // can pick up a credential, and every enrollment after that is
+                // held to the rule.
+                (_, None) => true,
+                (None, Some(_)) => false,
+            };
+            if !proved {
+                tracing::warn!(
+                    gateway = %req.name,
+                    gateway_id = %existing_id,
+                    "denied: re-enrollment without the gateway's current credential"
+                );
+                return Err(AppError::Forbidden);
+            }
         }
+
+        let auth_token = generate_token();
+        let auth_token_hash = hash_token(&auth_token);
+        let registration_hash = hash_token(&req.token);
+
+        let mut network_id = req.network_id;
+        if network_id.is_none() {
+            network_id = match &existing {
+                Some((id, _)) => {
+                    sqlx::query_scalar("SELECT network_id FROM gateways WHERE id = $1")
+                        .bind(id)
+                        .fetch_one(&self.state.db)
+                        .await?
+                }
+                None => {
+                    sqlx::query_scalar("SELECT id FROM networks WHERE name = 'development'")
+                        .fetch_optional(&self.state.db)
+                        .await?
+                }
+            };
+        }
+
         let row: (
             Uuid,
             String,
@@ -87,12 +142,16 @@ impl GatewayService {
             DateTime<Utc>,
         ) = sqlx::query_as(
             r#"
-            INSERT INTO gateways (name, public_key, endpoint, network_id, registration_token_hash)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO gateways
+              (name, public_key, endpoint, network_id, registration_token_hash,
+               auth_token_hash, auth_token_rotated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
             ON CONFLICT (name) DO UPDATE SET
               public_key = EXCLUDED.public_key,
               endpoint = EXCLUDED.endpoint,
               network_id = COALESCE(EXCLUDED.network_id, gateways.network_id),
+              auth_token_hash = EXCLUDED.auth_token_hash,
+              auth_token_rotated_at = NOW(),
               updated_at = NOW()
             RETURNING id, name, public_key, endpoint, network_id, last_heartbeat_at,
                       config_version, created_at, updated_at
@@ -102,10 +161,74 @@ impl GatewayService {
         .bind(&req.public_key)
         .bind(&req.endpoint)
         .bind(network_id)
-        .bind(&token_hash)
+        .bind(&registration_hash)
+        .bind(&auth_token_hash)
         .fetch_one(&self.state.db)
         .await?;
-        Ok(map_gw(row))
+
+        let gateway = map_gw(row);
+        AuditService::new(self.state.clone())
+            .record(
+                "gateway.enrolled",
+                Some("allow"),
+                None,
+                None,
+                Some(&gateway.name),
+                None,
+                None,
+                None,
+                serde_json::json!({
+                    "gateway_id": gateway.id,
+                    "endpoint": gateway.endpoint,
+                    "re_enrollment": existing.is_some(),
+                }),
+            )
+            .await?;
+
+        Ok(RegisterGatewayResponse {
+            gateway,
+            auth_token,
+        })
+    }
+
+    /// Replace a gateway's credential. The previous value stops working as soon
+    /// as this returns.
+    pub async fn rotate_token(&self, id: Uuid) -> AppResult<Option<RotateGatewayTokenResponse>> {
+        let auth_token = generate_token();
+        let row: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+            r#"
+            UPDATE gateways
+            SET auth_token_hash = $2, auth_token_rotated_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, auth_token_rotated_at
+            "#,
+        )
+        .bind(id)
+        .bind(hash_token(&auth_token))
+        .fetch_optional(&self.state.db)
+        .await?;
+
+        let Some((gateway_id, rotated_at)) = row else {
+            return Ok(None);
+        };
+        AuditService::new(self.state.clone())
+            .record(
+                "gateway.token_rotated",
+                Some("allow"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                serde_json::json!({ "gateway_id": gateway_id }),
+            )
+            .await?;
+        Ok(Some(RotateGatewayTokenResponse {
+            gateway_id,
+            auth_token,
+            rotated_at,
+        }))
     }
 
     pub async fn heartbeat(

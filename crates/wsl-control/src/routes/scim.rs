@@ -1,9 +1,13 @@
+use crate::auth::bearer::bearer_token;
+use crate::auth::service_token::{require_scope, SCOPE_SCIM};
 use crate::error::{AppError, AppResult};
 use crate::services::groups::GroupService;
 use crate::services::users::UserService;
 use crate::state::AppState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
+    middleware::{from_fn_with_state, Next},
+    response::Response,
     routing::get,
     Json, Router,
 };
@@ -11,7 +15,27 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wsl_types::{CreateGroupRequest, CreateUserRequest, UpdateUserRequest};
 
-pub fn router() -> Router<AppState> {
+/// Require a `scim:manage` service token on every SCIM call.
+///
+/// Applied as a `route_layer` so it runs only for paths this router matched —
+/// an unmatched path still 404s rather than reporting 401 and confirming the
+/// SCIM surface exists.
+///
+/// The discovery endpoints (ServiceProviderConfig, ResourceTypes, Schemas) are
+/// behind it too. RFC 7644 permits serving them anonymously, but they describe
+/// the provisioning surface, and every IdP that matters sends its bearer token
+/// on those calls anyway.
+async fn scim_auth(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    let (parts, body) = request.into_parts();
+    require_scope(&state, bearer_token(&parts), SCOPE_SCIM).await?;
+    Ok(next.run(Request::from_parts(parts, body)).await)
+}
+
+pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/ServiceProviderConfig", get(service_provider_config))
         .route("/ResourceTypes", get(resource_types))
@@ -26,6 +50,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Groups", get(list_groups).post(create_group))
         .route("/Groups/{id}", get(get_group).delete(delete_group))
+        .route_layer(from_fn_with_state(state, scim_auth))
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +223,10 @@ async fn replace_user(
             UpdateUserRequest {
                 display_name: body.display_name,
                 active: body.active,
+                // Roles are never taken from the directory: a SCIM
+                // credential that could set `admin` would make every IdP
+                // group mapping a privilege-escalation path.
+                role: None,
             },
         )
         .await?
@@ -237,6 +266,10 @@ async fn patch_user(
             UpdateUserRequest {
                 display_name,
                 active,
+                // Roles are never taken from the directory: a SCIM
+                // credential that could set `admin` would make every IdP
+                // group mapping a privilege-escalation path.
+                role: None,
             },
         )
         .await?

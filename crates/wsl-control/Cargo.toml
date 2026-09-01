@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "wsl_control"
+path = "src/lib.rs"
+
 [[bin]]
 name = "wsl-control"
 path = "src/main.rs"
@@ -28,6 +32,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -42,3 +47,7 @@ wsl-crypto = { workspace = true }
 wsl-policy = { workspace = true }
 wsl-types = { workspace = true }
 ipnetwork = "0.20"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { workspace = true, features = ["util"] }
