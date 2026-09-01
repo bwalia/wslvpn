@@ -28,14 +28,44 @@ cargo run -p wsl-cli -- connect --network development
 cargo run -p wsl-cli -- status
 ```
 
+## Production
+
+The control plane is deployed with the Helm chart in `deploy/helm/wslvpn`:
+
+```bash
+helm upgrade --install wslvpn oci://ghcr.io/bwalia/charts/wslvpn \
+  --namespace wslvpn --create-namespace \
+  --set config.publicUrl=https://vpn.example.com \
+  --set ingress.host=vpn.example.com \
+  --set config.oidc.issuer=https://idp.example.com \
+  --set 'config.adminEmails[0]=security@example.com'
+```
+
+Secrets are referenced from a `Secret`, never templated into the chart. On a
+fresh database, `config.adminEmails` is the only way an administrator comes into
+existence — leave it empty and nobody can reach the administrative API.
+
+See [Operations](docs/OPERATIONS.md) for the bootstrap checklist, backup and
+restore, and the runbooks.
+
+## Testing
+
+```bash
+make test
+```
+
+The control-plane authorization tests drive the real router against a real
+database, so `make test` brings a throwaway PostgreSQL up first.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Security](docs/SECURITY.md)
-- [Threat model](docs/THREAT-MODEL.md)
+- [Authorization](docs/AUTHORIZATION.md)
+- [Security](docs/SECURITY.md) · [Threat model](docs/THREAT-MODEL.md)
+- [Operations](docs/OPERATIONS.md) · [Upgrading](docs/UPGRADING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [GitOps](docs/GITOPS.md)
 - [API](docs/API.md)
-- [OpsAPI integration](docs/OPSAPI.md)
+- [OpsAPI integration](docs/OPSAPI.md) · [SCIM](docs/SCIM.md) · [OIDC](docs/OIDC.md)
 
 ## License
 
