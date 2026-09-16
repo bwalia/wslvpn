@@ -7,6 +7,7 @@ use wsl_types::{
     RegisterDeviceResponse,
 };
 
+use crate::oidc;
 use crate::posture;
 use crate::state::AgentState;
 use crate::tunnel::{self, TunnelState};
@@ -20,6 +21,20 @@ impl ControlClient {
         Self {
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Sign in through the identity provider.
+    ///
+    /// This is what a real deployment uses. `dev_login` below talks to an
+    /// endpoint the control plane refuses to serve unless it is bound to
+    /// loopback, so it can only ever reach a local demo.
+    pub async fn login(&self, state: &mut AgentState, open_browser: bool) -> Result<()> {
+        let token = oidc::browser_login(&self.http, &state.control_url, open_browser).await?;
+        state.access_token = Some(token.access_token);
+        state.user_id = Some(token.user_id);
+        state.email = Some(token.email);
+        state.save()?;
+        Ok(())
     }
 
     pub async fn dev_login(&self, state: &mut AgentState, email: &str) -> Result<()> {

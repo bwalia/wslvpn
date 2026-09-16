@@ -1,6 +1,7 @@
 //! WSL endpoint agent library (shared with CLI).
 
 pub mod client;
+pub mod oidc;
 pub mod posture;
 pub mod state;
 pub mod tunnel;

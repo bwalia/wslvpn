@@ -26,6 +26,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 wsl-crypto = { workspace = true }
+url = { workspace = true }
 wsl-types = { workspace = true }
 dirs = "6"
 # geteuid, to decide whether wg-quick needs escalating through sudo.

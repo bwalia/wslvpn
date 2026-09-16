@@ -9,7 +9,7 @@ dev:
 	@echo "Control plane: http://localhost:8080"
 	@echo "Swagger UI:    http://localhost:8080/swagger-ui"
 	@echo "Dex:           http://localhost:5556"
-	@echo "Try: cargo run -p wsl-cli -- login --email alice@example.com"
+	@echo "Try: cargo run -p wsl-cli -- login --dev --email alice@example.com"
 
 down:
 	docker compose -f deploy/compose/docker-compose.yml down -v

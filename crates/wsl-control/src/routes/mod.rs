@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
     let auth = Router::new()
         .route("/auth/oidc/authorize", get(oidc::authorize))
         .route("/auth/oidc/callback", get(oidc::callback))
+        .route("/auth/oidc/exchange", post(oidc::exchange))
         .route("/auth/dev/login", post(oidc::dev_login))
         .route_layer(axum::middleware::from_fn_with_state(
             auth_limiter,

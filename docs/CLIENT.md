@@ -34,11 +34,16 @@ at the cost of a password prompt on each connect.
 ## Lifecycle
 
 ```bash
-wsl login --email you@example.com
+wsl login
 wsl connect --network development
 wsl status
 wsl disconnect
 ```
+
+`login` runs the native-app OIDC flow described below. `--no-browser` prints the
+sign-in URL instead of opening one, for a remote shell. `--dev --email you@…`
+uses the local development login instead, which the control plane only serves
+when it is bound to loopback.
 
 `connect` creates the session first, then brings the interface up, because the
 gateway has to know about the peer before traffic will pass. `disconnect`
@@ -54,6 +59,32 @@ again.
 `--no-tunnel` on either command does the control-plane half only, and leaves the
 interface to you. It is what to use when something else on the host already
 manages WireGuard.
+
+## Signing in
+
+`login` is the RFC 8252 native-app flow. The client never holds a client secret
+and never sees your credentials:
+
+1. The client generates a random verifier and binds a listener on `127.0.0.1`
+   on a port the kernel picks.
+2. A browser opens at the control plane, carrying that loopback address and the
+   SHA-256 of the verifier — never the verifier itself.
+3. The control plane runs the OIDC handshake with your identity provider.
+4. The control plane sends the browser back to the loopback address with a
+   one-time code.
+5. The client redeems that code by presenting the verifier, and gets a token.
+
+Three properties come out of that shape:
+
+- The control plane will only send a browser to its own configured redirect or
+  to a loopback literal (`127.0.0.1`, `[::1]`) with a port. Names, including
+  `localhost`, are refused — a name can be made to resolve elsewhere, which is
+  the warning in RFC 8252 section 8.3.
+- What travels over loopback and lands in browser history is a code, not a
+  token, and it expires in two minutes.
+- The code is worthless without the verifier, which never leaves the client
+  process. A local process that watches the loopback request gains nothing. A
+  wrong verifier burns the code rather than allowing another attempt.
 
 ## What `status` reads
 

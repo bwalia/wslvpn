@@ -23,7 +23,7 @@ For a host-run control plane against Compose Postgres:
 
 ```bash
 DATABASE_URL=postgres://wsl:wsl@localhost:5433/wsl cargo run -p wsl-control
-cargo run -p wsl-cli -- login --email alice@example.com
+cargo run -p wsl-cli -- login --dev --email alice@example.com
 cargo run -p wsl-cli -- connect --network development
 cargo run -p wsl-cli -- status
 ```

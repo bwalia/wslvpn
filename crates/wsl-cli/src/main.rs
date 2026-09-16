@@ -14,10 +14,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Sign in (local/dev OIDC helper)
+    /// Sign in through your identity provider.
     Login {
+        /// Skip SSO and use the local development login instead. The control
+        /// plane only serves it when bound to loopback.
+        #[arg(long)]
+        dev: bool,
+        /// Email for --dev. Ignored by SSO, which gets identity from the
+        /// provider.
         #[arg(long, default_value = "alice@example.com")]
         email: String,
+        /// Print the sign-in URL but do not open a browser.
+        #[arg(long)]
+        no_browser: bool,
     },
     Logout,
     Status,
@@ -56,10 +65,21 @@ async fn main() -> anyhow::Result<()> {
     let client = ControlClient::new();
 
     match cli.command {
-        Commands::Login { email } => {
-            client.dev_login(&mut state, &email).await?;
+        Commands::Login {
+            dev,
+            email,
+            no_browser,
+        } => {
+            if dev {
+                client.dev_login(&mut state, &email).await?;
+            } else {
+                client.login(&mut state, !no_browser).await?;
+            }
             client.ensure_device(&mut state).await?;
-            println!("Signed in as {email}");
+            println!(
+                "Signed in as {}",
+                state.email.as_deref().unwrap_or("(unknown)")
+            );
             println!(
                 "Device registered: {}",
                 state.device_name.as_deref().unwrap_or("?")
