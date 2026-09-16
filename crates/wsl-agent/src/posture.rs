@@ -19,6 +19,7 @@
 //! The parsers are compiled on every platform so that the macOS ones are still
 //! covered when the suite runs on Linux.
 
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use wsl_types::{PostureResult, PostureSignal};
 
@@ -62,6 +63,10 @@ fn signal(name: &str, result: PostureResult, detail: Option<String>) -> PostureS
 ///
 /// A check that cannot run produces `None`, which becomes `Unknown` rather than
 /// a pass — the control plane decides what an unanswered question is worth.
+///
+/// macOS-only: every Linux signal is read from a file, which is one less binary
+/// to depend on and cannot be shadowed by something earlier on `PATH`.
+#[cfg(target_os = "macos")]
 fn capture(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
         .args(args)
