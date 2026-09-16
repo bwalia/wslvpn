@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use ipnetwork::IpNetwork;
 use std::net::IpAddr;
 use uuid::Uuid;
-use wsl_policy::{evaluate, AccessPolicyDocument, EvaluationInput};
+use wsl_policy::{device_reports_managed, evaluate, AccessPolicyDocument, EvaluationInput};
 use wsl_types::{
     ClientWireGuardConfig, CreateSessionRequest, CreateSessionResponse, PolicyDecision, Session,
     SessionIdentity, SessionStatus,
@@ -96,7 +96,12 @@ impl SessionService {
                 groups: &groups,
                 resource: &network.name,
                 posture: &req.posture,
-                device_managed: true,
+                // Was hardcoded true, which made `device.managed` in a policy
+                // satisfied by every device that asked. It is the endpoint's
+                // own report now - weaker than a record the administrator
+                // keeps, and the direction to take this next, but no longer a
+                // requirement that cannot fail.
+                device_managed: device_reports_managed(&req.posture),
             },
         );
 

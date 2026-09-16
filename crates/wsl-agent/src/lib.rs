@@ -9,3 +9,4 @@ pub mod tunnel;
 pub use client::ControlClient;
 pub use state::{AgentState, AgentStatus};
 pub use tunnel::{Escalation, TunnelState};
+pub use wsl_types::{PostureResult, PostureSignal};

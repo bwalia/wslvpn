@@ -105,6 +105,31 @@ async function renderNetworkChoices(connected) {
   }
 }
 
+// Which check is failing matters more than the verdict: "Posture: Failing"
+// tells a user they are blocked, and nothing about what to do next.
+const POSTURE_CLASS = {
+  pass: "ok",
+  fail: "bad",
+  unknown: "warn",
+  unsupported: "muted",
+};
+
+function renderPosture(signals) {
+  const list = el("posture-signals");
+  list.innerHTML = "";
+  for (const signal of signals ?? []) {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = signal.name.replace(/_/g, " ");
+    name.title = signal.detail ?? "";
+    const state = document.createElement("span");
+    state.textContent = signal.detail ?? signal.result;
+    state.className = POSTURE_CLASS[signal.result] ?? "muted";
+    row.append(name, state);
+    list.append(row);
+  }
+}
+
 function render(status) {
   const connected = Boolean(status.interface);
   const signedIn = status.identity !== "Signed out";
@@ -133,6 +158,7 @@ function render(status) {
   dot.classList.toggle("down", !connected);
   el("tunnel-state").textContent = connected ? "Connected" : "Disconnected";
 
+  renderPosture(status.posture_signals);
   renderNetworks(status);
   el("connect").hidden = connected;
   el("disconnect").hidden = !connected;

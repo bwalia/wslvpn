@@ -116,6 +116,20 @@ async fn main() -> anyhow::Result<()> {
             println!("Device:     {}", status.device.as_deref().unwrap_or("-"));
             println!("Identity:   {}", status.identity);
             println!("Posture:    {}", status.posture);
+            for signal in &status.posture_signals {
+                let mark = match signal.result {
+                    wsl_agent::PostureResult::Pass => "ok",
+                    wsl_agent::PostureResult::Fail => "FAIL",
+                    wsl_agent::PostureResult::Unknown => "?",
+                    wsl_agent::PostureResult::Unsupported => "n/a",
+                };
+                println!(
+                    "  {:<18} {:<5} {}",
+                    signal.name,
+                    mark,
+                    signal.detail.as_deref().unwrap_or("")
+                );
+            }
             println!();
             println!("Networks:");
             if status.networks.is_empty() {
