@@ -14,4 +14,4 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-wsl-agent = { path = "../wsl-agent" }
+wsl-agent = { path = "../wsl-agent", version = "0.1.0" }

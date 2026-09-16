@@ -29,6 +29,11 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "OpenSSL",
+    # webpki-roots ships Mozilla's CA trust store as data, licensed CDLA-
+    # Permissive-2.0. It is a permissive data licence: redistribution is
+    # unconditional and it attaches no terms to the software that reads the
+    # data. It reaches us through sqlx-core, hyper-rustls and reqwest.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

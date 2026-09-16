@@ -50,6 +50,9 @@ uuid = { version = "1", features = ["serde", "v4", "v7"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 
-wsl-types = { path = "crates/wsl-types" }
-wsl-crypto = { path = "crates/wsl-crypto" }
-wsl-policy = { path = "crates/wsl-policy" }
+# Internal crates carry an explicit version alongside the path so they are not
+# wildcard requirements: `bans.wildcards = "deny"` exists to stop a `*` from a
+# registry resolving to anything, and an unversioned path dep trips it.
+wsl-types = { path = "crates/wsl-types", version = "0.1.0" }
+wsl-crypto = { path = "crates/wsl-crypto", version = "0.1.0" }
+wsl-policy = { path = "crates/wsl-policy", version = "0.1.0" }
