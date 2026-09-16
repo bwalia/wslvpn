@@ -9,6 +9,7 @@ use wsl_types::{
 
 use crate::posture;
 use crate::state::AgentState;
+use crate::tunnel::{self, TunnelState};
 
 pub struct ControlClient {
     http: reqwest::Client,
@@ -56,11 +57,6 @@ impl ControlClient {
         store
             .store("wg.private", kp.private_key_b64.as_bytes())
             .await?;
-        // Also mirror for wg-quick convenience
-        std::fs::write(
-            AgentState::keystore_dir()?.join("wg.private"),
-            kp.private_key_b64.as_bytes(),
-        )?;
 
         let hostname = hostname();
         let req = RegisterDeviceRequest {
@@ -144,11 +140,48 @@ impl ControlClient {
             .await?;
         state.session = Some(resp.session.clone());
         state.wireguard = Some(resp.wireguard.clone());
+        state.network_name = Some(network.name.clone());
         state.save()?;
-        let conf_path = AgentState::data_dir()?.join("wsl.conf");
+        let conf_path = AgentState::wg_conf_path()?;
         state.write_wg_config(&conf_path)?;
         tracing::info!(path = %conf_path.display(), "wrote wireguard config");
         Ok(resp)
+    }
+
+    /// Create a session and bring the interface up.
+    ///
+    /// The session is created first because the gateway has to know about the
+    /// peer before traffic will pass. If the interface then fails to come up
+    /// the session is left in place rather than silently revoked: that is what
+    /// `wsl status` reports as "Session open, tunnel down", and it is what the
+    /// user retries against once they have fixed whatever wg-quick complained
+    /// about.
+    pub async fn connect_and_bring_up(
+        &self,
+        state: &mut AgentState,
+        network_name: Option<&str>,
+        allow_sudo: bool,
+    ) -> Result<(CreateSessionResponse, TunnelState)> {
+        let resp = self.connect(state, network_name).await?;
+        let conf_path = AgentState::wg_conf_path()?;
+        let tunnel = tunnel::up(&conf_path, allow_sudo).await?;
+        tracing::info!(interface = %tunnel.interface(), "tunnel up");
+        Ok((resp, tunnel))
+    }
+
+    /// Tear the interface down, then release the session.
+    ///
+    /// In that order: releasing the session first would leave an interface up
+    /// and pointed at a gateway that has already dropped the peer, which looks
+    /// to the user like a connected tunnel that silently blackholes.
+    pub async fn disconnect_and_tear_down(
+        &self,
+        state: &mut AgentState,
+        allow_sudo: bool,
+    ) -> Result<()> {
+        let conf_path = AgentState::wg_conf_path()?;
+        tunnel::down(&conf_path, allow_sudo).await?;
+        self.disconnect(state).await
     }
 
     pub async fn disconnect(&self, state: &mut AgentState) -> Result<()> {
@@ -166,6 +199,7 @@ impl ControlClient {
         }
         state.session = None;
         state.wireguard = None;
+        state.network_name = None;
         state.save()?;
         Ok(())
     }
@@ -176,6 +210,7 @@ impl ControlClient {
         state.user_id = None;
         state.session = None;
         state.wireguard = None;
+        state.network_name = None;
         state.save()?;
         Ok(())
     }

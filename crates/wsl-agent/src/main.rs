@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
     let state = AgentState::load()?;
     match cli.command.unwrap_or(Commands::Status) {
         Commands::Status => {
-            println!("{}", serde_json::to_string_pretty(&state.status())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&state.status(&wsl_agent::tunnel::state()))?
+            );
         }
     }
     let _ = ControlClient::new();
