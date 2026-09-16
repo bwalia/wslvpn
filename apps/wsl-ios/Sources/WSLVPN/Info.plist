@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>WSL Zero Trust</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<!-- Where the sign-in comes back to. Derived from a domain name
+			     because private-use schemes are first come, first served, and
+			     the control plane will only accept schemes an operator has
+			     named in identity.oidc.native_schemes. -->
+			<key>CFBundleURLName</key>
+			<string>io.wsl.zerotrust.callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>io.wsl.zerotrust</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

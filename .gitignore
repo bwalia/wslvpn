@@ -9,4 +9,11 @@ apps/wsl-desktop/dist/
 apps/wsl-desktop/src-tauri/target/
 # Tauri regenerates these from tauri.conf.json on every build.
 apps/wsl-desktop/src-tauri/gen/schemas/
+# iOS: the Xcode project is generated from project.yml, and the WireGuard
+# sources are fetched at a pinned revision by `make bootstrap`.
+apps/wsl-ios/WSLVPN.xcodeproj/
+apps/wsl-ios/Packages/WireGuardKit/upstream/
+apps/wsl-ios/build/
+apps/wsl-ios/DerivedData/
+**/xcuserdata/
 deploy/compose/data/

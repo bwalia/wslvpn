@@ -77,6 +77,32 @@ burns the code rather than allowing another guess.
 **Hashed at rest.** Only the SHA-256 of the code is stored, as with access
 tokens, so a database dump does not hand over pending logins.
 
+## Mobile clients
+
+A phone cannot hold a loopback listener open reliably and cannot stop another
+app binding the port first, so it registers a private-use URI scheme instead —
+RFC 8252 section 7.1. The rest of the handshake is identical: the same
+challenge, the same one-time code, the same exchange.
+
+Nothing is accepted unless the deployment names it:
+
+```yaml
+identity:
+  oidc:
+    native_schemes:
+      - io.wsl.zerotrust
+```
+
+The schemes are validated at startup. `http`, `https`, `file`, `data` and
+`javascript` are refused — accepting any of them here would route around the
+loopback rules. A scheme must also be derived from a domain name you control:
+`wslvpn` is refused where `io.wsl.zerotrust` is accepted, because private-use
+schemes are first come, first served and a bare word is squattable. PKCE means
+an intercepted code is worthless without the verifier; the allowlist is what
+decides which apps may collect a login at all.
+
+See [iOS](IOS.md).
+
 ## Local development
 
 Compose runs Dex. `POST /auth/dev/login {"email": "..."}` mints a token for any

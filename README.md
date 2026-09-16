@@ -9,7 +9,8 @@ Lightweight, self-hosted, WireGuard-based Zero Trust access.
 - `wsl-control` — Rust control plane (Axum + PostgreSQL)
 - `wsl-gateway` — WireGuard data plane
 - `wsl-agent` / `wsl-cli` — endpoint agent and CLI
-- `wsl-desktop` — minimal macOS UI
+- `wsl-desktop` — macOS UI over the CLI
+- `wsl-ios` — iPhone and iPad client with its own packet tunnel
 
 ## Quick start (local)
 
@@ -65,7 +66,7 @@ database, so `make test` brings a throwaway PostgreSQL up first.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Client](docs/CLIENT.md) · [Posture](docs/POSTURE.md)
+- [Client](docs/CLIENT.md) · [Desktop](docs/DESKTOP.md) · [iOS](docs/IOS.md) · [Posture](docs/POSTURE.md)
 - [Authorization](docs/AUTHORIZATION.md)
 - [Security](docs/SECURITY.md) · [Threat model](docs/THREAT-MODEL.md)
 - [Operations](docs/OPERATIONS.md) · [Upgrading](docs/UPGRADING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
