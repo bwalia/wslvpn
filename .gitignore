@@ -7,4 +7,6 @@ target/
 apps/wsl-desktop/node_modules/
 apps/wsl-desktop/dist/
 apps/wsl-desktop/src-tauri/target/
+# Tauri regenerates these from tauri.conf.json on every build.
+apps/wsl-desktop/src-tauri/gen/schemas/
 deploy/compose/data/

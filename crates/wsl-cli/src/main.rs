@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use wsl_agent::{AgentState, ControlClient};
+use wsl_agent::{AgentState, ControlClient, Escalation};
 
 #[derive(Debug, Parser)]
 #[command(name = "wsl", about = "WSL Zero Trust VPN CLI")]
@@ -29,26 +29,41 @@ enum Commands {
         no_browser: bool,
     },
     Logout,
-    Status,
+    Status {
+        /// Emit the status as JSON, for another program to read.
+        #[arg(long)]
+        json: bool,
+    },
     Connect {
         #[arg(long)]
         network: Option<String>,
         /// Write the WireGuard config but do not bring the interface up.
         #[arg(long)]
         no_tunnel: bool,
-        /// Never escalate through sudo; fail instead if not already root.
+        /// Never escalate; fail instead if not already root.
         #[arg(long)]
         no_sudo: bool,
+        /// Ask the desktop for privilege rather than prompting on a terminal.
+        /// This is what the GUI uses: it has no terminal for sudo to prompt on.
+        #[arg(long)]
+        gui: bool,
     },
     Disconnect {
         /// Release the session but leave the interface alone.
         #[arg(long)]
         no_tunnel: bool,
-        /// Never escalate through sudo; fail instead if not already root.
+        /// Never escalate; fail instead if not already root.
         #[arg(long)]
         no_sudo: bool,
+        /// Ask the desktop for privilege rather than prompting on a terminal.
+        #[arg(long)]
+        gui: bool,
     },
-    Networks,
+    Networks {
+        /// Emit the networks as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     Devices,
     Policy,
     Diagnostics,
@@ -89,8 +104,12 @@ async fn main() -> anyhow::Result<()> {
             client.logout(&mut state)?;
             println!("Signed out");
         }
-        Commands::Status => {
+        Commands::Status { json } => {
             let status = state.status(&wsl_agent::tunnel::state());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                return Ok(());
+            }
             println!("{}", status.product);
             println!();
             println!("User:       {}", status.user.as_deref().unwrap_or("-"));
@@ -122,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
             network,
             no_tunnel,
             no_sudo,
+            gui,
         } => {
             let resp = if no_tunnel {
                 let resp = client.connect(&mut state, network.as_deref()).await?;
@@ -129,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
                 resp
             } else {
                 let (resp, tunnel) = client
-                    .connect_and_bring_up(&mut state, network.as_deref(), !no_sudo)
+                    .connect_and_bring_up(&mut state, network.as_deref(), escalation(no_sudo, gui))
                     .await?;
                 println!("Connected on {}", tunnel.interface());
                 resp
@@ -145,20 +165,29 @@ async fn main() -> anyhow::Result<()> {
                 AgentState::wg_conf_path()?.display()
             );
         }
-        Commands::Disconnect { no_tunnel, no_sudo } => {
+        Commands::Disconnect {
+            no_tunnel,
+            no_sudo,
+            gui,
+        } => {
             if no_tunnel {
                 client.disconnect(&mut state).await?;
                 println!("Session released; interface left alone (--no-tunnel).");
             } else {
                 client
-                    .disconnect_and_tear_down(&mut state, !no_sudo)
+                    .disconnect_and_tear_down(&mut state, escalation(no_sudo, gui))
                     .await?;
                 println!("Disconnected");
             }
         }
-        Commands::Networks => {
-            for n in client.list_networks(&state).await? {
-                println!("{}  {}", n.name, n.cidr);
+        Commands::Networks { json } => {
+            let networks = client.list_networks(&state).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&networks)?);
+            } else {
+                for n in networks {
+                    println!("{}  {}", n.name, n.cidr);
+                }
             }
         }
         Commands::Devices => {
@@ -196,4 +225,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Translate the command-line flags into how the agent may ask for root.
+///
+/// `--no-sudo` wins: a caller that says not to escalate must not then be
+/// escalated a different way.
+fn escalation(no_sudo: bool, gui: bool) -> Escalation {
+    match (no_sudo, gui) {
+        (true, _) => Escalation::None,
+        (false, true) => Escalation::Graphical,
+        (false, false) => Escalation::Terminal,
+    }
 }

@@ -8,4 +8,4 @@ pub mod tunnel;
 
 pub use client::ControlClient;
 pub use state::{AgentState, AgentStatus};
-pub use tunnel::TunnelState;
+pub use tunnel::{Escalation, TunnelState};
