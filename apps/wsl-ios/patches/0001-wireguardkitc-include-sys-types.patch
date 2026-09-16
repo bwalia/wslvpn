@@ -1,0 +1,30 @@
+Include <sys/types.h> in the WireGuardKitC umbrella header.
+
+WireGuardKitC.h re-declares struct ctl_info and struct sockaddr_ctl, copied
+from <sys/kern_control.h>, using the BSD type names u_int32_t, u_char and
+u_int16_t. It never includes the header that defines them.
+
+Under the implicit-modules build this compiled, because by the time the
+umbrella header was parsed those names had leaked in from another header in
+the same translation unit. Xcode 26 builds Swift with explicit modules, which
+precompiles the module map on its own, and there the names are simply
+undefined:
+
+    error: declaration of 'u_int32_t' must be imported from module
+    '_DarwinFoundation1.unsigned_types.u_int32_t' before it is required
+
+One include fixes it. Reported nowhere upstream that we can push to, so it is
+applied here at fetch time; `make upstream` fails loudly if it stops applying,
+which is what should happen if the pinned revision ever moves.
+
+--- a/Sources/WireGuardKitC/WireGuardKitC.h
++++ b/Sources/WireGuardKitC/WireGuardKitC.h
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: MIT
+ // Copyright © 2018-2023 WireGuard LLC. All Rights Reserved.
+ 
++#include <sys/types.h>
++
+ #include "key.h"
+ #include "x25519.h"
+ 

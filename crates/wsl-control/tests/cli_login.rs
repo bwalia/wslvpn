@@ -171,6 +171,79 @@ async fn a_loopback_redirect_without_a_port_is_refused(pool: PgPool) {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// --- where a mobile client may be sent ------------------------------------
+
+/// A phone cannot listen on loopback, so it registers a scheme with the
+/// operating system instead. Only schemes the deployment named are accepted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_configured_native_scheme_starts_a_login(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let (status, _) = get(&authorize_uri(
+        "io.wsl.zerotrust://callback",
+        Some(CHALLENGE),
+    ))
+    .send(&app)
+    .await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT client_redirect_uri FROM oidc_auth_states LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("an auth state");
+    assert_eq!(stored.as_deref(), Some("io.wsl.zerotrust://callback"));
+}
+
+/// Private-use schemes are first come, first served: a second app can register
+/// the same one. An unlisted scheme must not be able to collect a login.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unlisted_native_scheme_is_refused(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    for scheme in [
+        "com.evil.app://callback",
+        "wslvpn://callback",
+        "io.wsl.zerotrust.evil://callback",
+    ] {
+        let (status, body) = get(&authorize_uri(scheme, Some(CHALLENGE)))
+            .send(&app)
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{scheme} was allowed: {body}"
+        );
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_auth_states")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(count, 0);
+}
+
+/// The scheme branch must not become a way around the loopback rules: an
+/// https redirect is still judged as a web redirect, not as a native one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_native_branch_does_not_let_https_through(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let (status, _) = get(&authorize_uri(
+        "https://evil.example.com/cb",
+        Some(CHALLENGE),
+    ))
+    .send(&app)
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_native_redirect_still_requires_a_challenge(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let (status, _) = get(&authorize_uri("io.wsl.zerotrust://callback", None))
+        .send(&app)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 // --- redeeming the code ----------------------------------------------------
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -304,4 +377,52 @@ async fn the_code_itself_is_never_stored(pool: PgPool) {
         .expect("a row");
     assert_ne!(stored, "code-secret");
     assert_eq!(stored, hash_token("code-secret"));
+}
+
+// --- what may be configured as a native scheme -----------------------------
+
+/// Validated at startup rather than per request: a scheme nobody can safely
+/// accept should stop the deployment, not fail one login at a time.
+#[test]
+fn a_reverse_domain_scheme_is_accepted() {
+    for good in ["io.wsl.zerotrust", "com.example.vpn", "org.example.app-two"] {
+        assert!(
+            wsl_control::config::validate_native_scheme(good).is_ok(),
+            "{good} should be allowed"
+        );
+    }
+}
+
+#[test]
+fn a_squattable_bare_word_is_refused() {
+    let err = wsl_control::config::validate_native_scheme("wslvpn").expect_err("bare word");
+    assert!(err.to_string().contains("domain"), "{err}");
+}
+
+/// Accepting either here would route around the loopback rules.
+#[test]
+fn the_web_schemes_are_refused() {
+    for bad in ["http", "https", "file", "data", "javascript"] {
+        assert!(
+            wsl_control::config::validate_native_scheme(bad).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+/// URL parsing lowercases a scheme, so an uppercase entry in the config would
+/// silently never match anything.
+#[test]
+fn an_uppercase_scheme_is_refused_rather_than_never_matching() {
+    assert!(wsl_control::config::validate_native_scheme("IO.WSL.Zerotrust").is_err());
+}
+
+#[test]
+fn a_scheme_that_is_not_a_scheme_is_refused() {
+    for bad in ["1.example.app", "io.wsl zerotrust", "io.wsl/zerotrust", ""] {
+        assert!(
+            wsl_control::config::validate_native_scheme(bad).is_err(),
+            "{bad:?}"
+        );
+    }
 }

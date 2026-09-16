@@ -32,12 +32,36 @@ pub struct AuthorizeQuery {
 /// Loopback is restricted to the literal addresses. `localhost` is a name, and
 /// a name can be made to resolve somewhere else; RFC 8252 section 8.3 says to
 /// use the literal IPs for exactly that reason.
-fn validate_client_redirect(uri: &str, configured: &str) -> AppResult<()> {
+///
+/// A mobile client cannot listen on loopback at all, so it registers a
+/// private-use scheme with the operating system and is sent back through that.
+/// Those are accepted only when the deployment has named them in
+/// `identity.oidc.native_schemes` — an unlisted scheme is refused, so an
+/// authorize URL cannot be made to deliver a login to an app the operator never
+/// approved.
+fn validate_client_redirect(
+    uri: &str,
+    configured: &str,
+    native_schemes: &[String],
+) -> AppResult<()> {
     if uri == configured {
         return Ok(());
     }
     let parsed =
         url::Url::parse(uri).map_err(|e| AppError::bad_request(format!("redirect_uri: {e}")))?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        // `Url` lowercases the scheme while parsing, and the configured list is
+        // required to be lowercase, so this compares like with like.
+        return if native_schemes.iter().any(|s| s == parsed.scheme()) {
+            Ok(())
+        } else {
+            Err(AppError::bad_request(
+                "redirect_uri scheme is not in identity.oidc.native_schemes",
+            ))
+        };
+    }
+
     if parsed.scheme() != "http" {
         return Err(AppError::bad_request(
             "redirect_uri must be http on a loopback address",
@@ -78,7 +102,11 @@ pub async fn authorize(
 ) -> AppResult<impl IntoResponse> {
     let configured = state.config.identity.oidc.redirect_uri.clone();
     let redirect_uri = q.redirect_uri.unwrap_or_else(|| configured.clone());
-    validate_client_redirect(&redirect_uri, &configured)?;
+    validate_client_redirect(
+        &redirect_uri,
+        &configured,
+        &state.config.identity.oidc.native_schemes,
+    )?;
     // A native client is one that proves possession of a verifier later. No
     // challenge means the browser flow, which ends in a JSON token response.
     let client_redirect = (redirect_uri != configured).then(|| redirect_uri.clone());

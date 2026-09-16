@@ -85,6 +85,15 @@ pub struct OidcConfig {
     pub client_secret: Option<String>,
     pub scopes: Vec<String>,
     pub redirect_uri: String,
+    /// Private-use URI schemes a native app may be sent back to.
+    ///
+    /// A desktop client can listen on loopback; a mobile one cannot, and uses a
+    /// scheme the operating system routes to it instead (RFC 8252 section 7.1).
+    /// Nothing is accepted unless it is named here: an empty list means no
+    /// mobile client can complete a login, which is the right default for a
+    /// deployment that does not have one.
+    #[serde(default)]
+    pub native_schemes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +214,9 @@ impl Config {
         if self.identity.oidc.issuer.is_empty() || self.identity.oidc.client_id.is_empty() {
             anyhow::bail!("identity.oidc.issuer and client_id required");
         }
+        for scheme in &self.identity.oidc.native_schemes {
+            validate_native_scheme(scheme)?;
+        }
         if self.database.max_connections == 0 {
             anyhow::bail!("database.max_connections must be at least 1");
         }
@@ -308,6 +320,44 @@ pub fn expand_env(raw: &str) -> Result<String> {
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Check that a configured native redirect scheme is one it is safe to accept.
+///
+/// Private-use schemes are first come, first served on every operating system
+/// that has them: nothing stops a second app registering the same one, and the
+/// OS may then route the redirect to either. RFC 8252 section 7.1 answers that
+/// by requiring a scheme derived from a domain name the app's author controls,
+/// which is why a bare word is refused here — `wslvpn:` is squattable in a way
+/// `io.wsl.zerotrust:` is not.
+///
+/// `http` and `https` are refused outright. Accepting either here would route
+/// around the loopback rules the other branch enforces.
+pub fn validate_native_scheme(scheme: &str) -> anyhow::Result<()> {
+    let lower = scheme.to_ascii_lowercase();
+    if lower != scheme {
+        anyhow::bail!("identity.oidc.native_schemes: '{scheme}' must be lowercase");
+    }
+    if matches!(
+        lower.as_str(),
+        "http" | "https" | "file" | "data" | "javascript"
+    ) {
+        anyhow::bail!("identity.oidc.native_schemes: '{scheme}' is not a private-use scheme");
+    }
+    if !lower.contains('.') {
+        anyhow::bail!(
+            "identity.oidc.native_schemes: '{scheme}' must be derived from a domain \
+             name you control, such as 'io.example.vpn' (RFC 8252 section 7.1)"
+        );
+    }
+    // The scheme grammar from RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    let mut chars = lower.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !first_ok || !rest_ok {
+        anyhow::bail!("identity.oidc.native_schemes: '{scheme}' is not a valid URI scheme");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

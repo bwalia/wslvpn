@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Granted by Apple per App ID. Without it the extension will not load,
+	     and there is no way to test that on a simulator. -->
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
+	<!-- Shared with the app so the extension can read the device private key
+	     from the keychain rather than have it passed in. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)io.wsl.zerotrust</string>
+	</array>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.io.wsl.zerotrust</string>
+	</array>
+</dict>
+</plist>

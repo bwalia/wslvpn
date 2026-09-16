@@ -1,0 +1,144 @@
+# Generated with XcodeGen: `xcodegen generate` in this directory.
+#
+# The project file is not committed. A .pbxproj is a merge conflict generator
+# and an unreviewable diff; this file is the thing to read and to change.
+
+name: WSLVPN
+options:
+  bundleIdPrefix: io.wsl.zerotrust
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  # A local package wrapping upstream WireGuardKit, whose own manifest does not
+  # build under Xcode 26. `make bootstrap` fetches the sources it compiles,
+  # pinned to WIREGUARD_REVISION. See Packages/WireGuardKit/Package.swift.
+  WireGuardKit:
+    path: Packages/WireGuardKit
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: PAS2QUVJHC
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1.0"
+
+targets:
+  # Everything both the app and the tunnel need, and nothing that only one of
+  # them needs. In particular it does not link WireGuardKit: that pulls in a Go
+  # static library which has no simulator slice, and keeping it out is what lets
+  # this target - and its tests - build and run on a simulator.
+  WSLKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Sources/WSLKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.kit
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: NO
+        BUILD_LIBRARY_FOR_DISTRIBUTION: NO
+
+  WSLVPN:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/WSLVPN
+    dependencies:
+      - target: WSLKit
+      - target: WSLTunnel
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        INFOPLIST_FILE: Sources/WSLVPN/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/WSLVPN/WSLVPN.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  # The packet tunnel. This is the only target that links WireGuardKit, and the
+  # only one that cannot be built for a simulator.
+  WSLTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/WSLTunnel
+    dependencies:
+      - target: WSLKit
+      - package: WireGuardKit
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.tunnel
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        INFOPLIST_FILE: Sources/WSLTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/WSLTunnel/WSLTunnel.entitlements
+        # The Makefile below writes libwg-go.a into CONFIGURATION_BUILD_DIR.
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(CONFIGURATION_BUILD_DIR)
+    preBuildScripts:
+      # WireGuardKitGo ships Go sources and a Makefile, not a binary: SwiftPM
+      # declares `-lwg-go` and expects something else to have produced it. That
+      # something is this. The Makefile copies GOROOT and patches the Go runtime
+      # to use mach_continuous_time, so that timers keep running across a device
+      # suspend - which on a phone is most of the time.
+      - name: Build wireguard-go
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          CHECKOUT="${SRCROOT}/Packages/WireGuardKit/upstream/Sources/WireGuardKitGo"
+          if [ ! -d "$CHECKOUT" ]; then
+            echo "error: WireGuardKitGo not found at $CHECKOUT" >&2
+            echo "note: run 'make bootstrap' to fetch the pinned WireGuard sources" >&2
+            exit 1
+          fi
+          # Go is not on a GUI build's PATH; the Makefile adds the usual
+          # locations itself, but be explicit so the failure is legible.
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v go >/dev/null || { echo "error: go is required to build wireguard-go" >&2; exit 1; }
+          make -C "$CHECKOUT" build
+
+  WSLKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/WSLKitTests
+    dependencies:
+      - target: WSLKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.kit.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  WSLVPN:
+    build:
+      targets:
+        WSLVPN: all
+        WSLTunnel: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - WSLKitTests
+
+  # Builds and tests only what does not depend on the Go library, so it runs on
+  # a simulator. This is the scheme CI can use.
+  WSLKit:
+    build:
+      targets:
+        WSLKit: all
+        WSLKitTests: [test]
+    test:
+      config: Debug
+      targets:
+        - WSLKitTests
