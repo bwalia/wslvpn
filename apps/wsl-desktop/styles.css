@@ -95,6 +95,8 @@ strong { color: var(--fg); }
 
 .ok { color: var(--accent); font-size: 0.85rem; }
 .warn { color: var(--warn); font-size: 0.85rem; }
+.bad { color: var(--danger); font-size: 0.85rem; }
+.muted { color: var(--muted); font-size: 0.85rem; }
 .hint { font-size: 0.85rem; margin-bottom: 0; }
 .error {
   color: var(--danger);

@@ -1,5 +1,75 @@
 # Upgrading
 
+## To the release that makes device posture real
+
+Posture used to be four hardcoded values. `disk_encryption` was always
+`Unknown`, `device_management` was always `Unsupported`, and nothing was
+measured — so no device could fail a compliance check. The control plane also
+passed `device_managed: true` for every session, so `device.managed` in a policy
+was satisfied by every device that asked.
+
+Both requirements now mean something, and **devices that were being allowed will
+start being denied.** That is the point of the change, but it will not feel like
+it at three in the morning, so read this first.
+
+### What changed
+
+| Change | Effect |
+| --- | --- |
+| Posture is measured | `disk_encryption`, `device_management` and `firewall` can now report `Fail` |
+| `Unknown` no longer passes | A check that could not run is not a check that passed |
+| Empty posture no longer passes | `all()` over no signals was vacuously true; an agent sending nothing satisfied everything |
+| `device.managed` reads the reported signal | Was hardcoded `true` |
+| `device.requiredSignals` added | Name the checks that matter instead of requiring all of them |
+
+`Unsupported` still passes the blanket `compliant: true` check: denying a
+platform that has no such concept would make a policy unsatisfiable rather than
+express anything. It does **not** satisfy a signal named in `requiredSignals`,
+or `managed: true` — an operator asking a specific question has not been
+answered by "this platform cannot tell you".
+
+### Before you upgrade
+
+`device.compliant` defaults to `true`, so a policy with no `device:` block is
+affected. Find out what your fleet actually reports before the new rule starts
+denying on it:
+
+```bash
+wsl status          # per device, lists every signal and its detail
+```
+
+A Mac with FileVault off, no MDM enrolment, or the application firewall
+disabled will now fail `compliant: true`. On a default macOS install the
+firewall is off, so expect that one.
+
+### Narrowing the requirement
+
+Requiring every check to pass is rarely what an operator means. Name the ones
+that matter:
+
+```yaml
+spec:
+  device:
+    requiredSignals:
+      - disk_encryption
+```
+
+Naming any signal replaces the blanket check, so the firewall and enrolment
+states above stop mattering while full-disk encryption is still enforced.
+
+To roll back to the old effective behaviour while you work through a fleet, set
+`compliant: false` on the affected policies. That is a real reduction in
+control, not a no-op — it was only ever equivalent because nothing was measured.
+
+### A limit worth knowing
+
+Every signal is the endpoint's own account of itself, collected by an agent
+running as the user. A device that has been taken over will report whatever its
+owner wants. Posture raises the cost of using a compromised or careless machine;
+it does not authenticate one. `device.managed` in particular is the device's
+claim, not a record the administrator keeps — an admin-held enrolment record
+would be stronger and is the direction to take this next.
+
 ## To the release that adds authorization
 
 This release closes an authorization gap and, in doing so, changes behaviour

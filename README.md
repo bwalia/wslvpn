@@ -65,7 +65,7 @@ database, so `make test` brings a throwaway PostgreSQL up first.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Client](docs/CLIENT.md)
+- [Client](docs/CLIENT.md) · [Posture](docs/POSTURE.md)
 - [Authorization](docs/AUTHORIZATION.md)
 - [Security](docs/SECURITY.md) · [Threat model](docs/THREAT-MODEL.md)
 - [Operations](docs/OPERATIONS.md) · [Upgrading](docs/UPGRADING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)

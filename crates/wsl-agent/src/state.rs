@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use wsl_types::{ClientWireGuardConfig, Session};
+use wsl_types::{ClientWireGuardConfig, PostureResult, PostureSignal, Session};
 
+use crate::posture;
 use crate::tunnel::TunnelState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,6 +35,36 @@ pub struct AgentStatus {
     /// The device the tunnel is on — a `utun` on macOS, the configured name on
     /// Linux. `None` when nothing is up.
     pub interface: Option<String>,
+    /// Every signal behind the `posture` summary, so a user can see which check
+    /// is the one holding them up.
+    pub posture_signals: Vec<PostureSignal>,
+}
+
+/// Reduce the signals to one line.
+///
+/// A failing check is what a user needs to see first, and an unanswered one
+/// second — a check that could not run is not a check that passed. Naming the
+/// signals rather than counting them means the summary says what to go and fix.
+fn summarise_posture(signals: &[PostureSignal]) -> String {
+    let named = |result: PostureResult| -> Vec<&str> {
+        signals
+            .iter()
+            .filter(|s| s.result == result)
+            .map(|s| s.name.as_str())
+            .collect()
+    };
+    let failed = named(PostureResult::Fail);
+    if !failed.is_empty() {
+        return format!("Failing: {}", failed.join(", "));
+    }
+    let unknown = named(PostureResult::Unknown);
+    if !unknown.is_empty() {
+        return format!("Unknown: {}", unknown.join(", "));
+    }
+    if signals.is_empty() {
+        return "No signals".into();
+    }
+    "Compliant".into()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +130,17 @@ impl AgentState {
     /// session record is not the same as having an interface, and conflating
     /// the two is what let the agent claim it was connected when it was not.
     pub fn status(&self, tunnel: &TunnelState) -> AgentStatus {
+        let signals = posture::collect();
+        self.status_with_posture(tunnel, signals)
+    }
+
+    /// The same report from a given set of signals, so the summary can be
+    /// asserted without the host the suite happens to run on deciding it.
+    pub fn status_with_posture(
+        &self,
+        tunnel: &TunnelState,
+        posture_signals: Vec<PostureSignal>,
+    ) -> AgentStatus {
         let connected = tunnel.is_up();
         AgentStatus {
             product: "WSL Zero Trust".into(),
@@ -109,7 +151,7 @@ impl AgentState {
             } else {
                 "Signed out".into()
             },
-            posture: "Compliant".into(),
+            posture: summarise_posture(&posture_signals),
             networks: match (self.session.is_some(), connected) {
                 (true, true) => vec![NetworkStatus {
                     name: self.network_name(),
@@ -134,6 +176,7 @@ impl AgentState {
                 TunnelState::Up { interface } => Some(interface.clone()),
                 TunnelState::Down => None,
             },
+            posture_signals,
         }
     }
 
@@ -279,7 +322,7 @@ mod tests {
     fn a_session_without_an_interface_is_not_reported_as_connected() {
         let mut state = connected_state();
         state.session = Some(session_fixture());
-        let status = state.status(&TunnelState::Down);
+        let status = state.status_with_posture(&TunnelState::Down, Vec::new());
         assert_eq!(status.networks.len(), 1);
         assert_eq!(status.networks[0].name, "Development");
         assert_eq!(status.networks[0].state, "Session open, tunnel down");
@@ -290,18 +333,85 @@ mod tests {
     fn an_interface_and_a_session_together_read_as_connected() {
         let mut state = connected_state();
         state.session = Some(session_fixture());
-        let status = state.status(&TunnelState::Up {
-            interface: "utun6".into(),
-        });
+        let status = state.status_with_posture(
+            &TunnelState::Up {
+                interface: "utun6".into(),
+            },
+            Vec::new(),
+        );
         assert_eq!(status.networks[0].state, "Connected");
         assert_eq!(status.interface.as_deref(), Some("utun6"));
     }
 
     #[test]
     fn nothing_signed_in_lists_no_networks() {
-        let status = AgentState::default().status(&TunnelState::Down);
+        let status = AgentState::default().status_with_posture(&TunnelState::Down, Vec::new());
         assert!(status.networks.is_empty());
         assert_eq!(status.identity, "Signed out");
+    }
+
+    fn posture(pairs: &[(&str, PostureResult)]) -> Vec<PostureSignal> {
+        pairs
+            .iter()
+            .map(|(name, result)| PostureSignal {
+                name: (*name).into(),
+                result: *result,
+                detail: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_healthy_device_reads_as_compliant() {
+        let signals = posture(&[
+            ("disk_encryption", PostureResult::Pass),
+            ("device_management", PostureResult::Unsupported),
+        ]);
+        assert_eq!(summarise_posture(&signals), "Compliant");
+    }
+
+    /// The summary names the check rather than counting them: a user reading
+    /// "Failing: disk_encryption" knows what to go and turn on.
+    #[test]
+    fn a_failing_check_is_named() {
+        let signals = posture(&[
+            ("disk_encryption", PostureResult::Fail),
+            ("firewall", PostureResult::Pass),
+        ]);
+        assert_eq!(summarise_posture(&signals), "Failing: disk_encryption");
+    }
+
+    #[test]
+    fn a_failure_outranks_an_unknown() {
+        let signals = posture(&[
+            ("disk_encryption", PostureResult::Unknown),
+            ("firewall", PostureResult::Fail),
+        ]);
+        assert_eq!(summarise_posture(&signals), "Failing: firewall");
+    }
+
+    /// A check that could not run is not a check that passed, and the summary
+    /// must not round it to "Compliant".
+    #[test]
+    fn an_unknown_check_is_not_compliant() {
+        let signals = posture(&[
+            ("disk_encryption", PostureResult::Unknown),
+            ("firewall", PostureResult::Pass),
+        ]);
+        assert_eq!(summarise_posture(&signals), "Unknown: disk_encryption");
+    }
+
+    #[test]
+    fn no_signals_is_not_compliance_either() {
+        assert_eq!(summarise_posture(&[]), "No signals");
+    }
+
+    #[test]
+    fn the_status_carries_the_signals_behind_the_summary() {
+        let signals = posture(&[("disk_encryption", PostureResult::Fail)]);
+        let status = AgentState::default().status_with_posture(&TunnelState::Down, signals);
+        assert_eq!(status.posture, "Failing: disk_encryption");
+        assert_eq!(status.posture_signals.len(), 1);
     }
 
     fn session_fixture() -> Session {
