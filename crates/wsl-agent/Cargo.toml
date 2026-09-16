@@ -28,3 +28,5 @@ uuid = { workspace = true }
 wsl-crypto = { workspace = true }
 wsl-types = { workspace = true }
 dirs = "6"
+# geteuid, to decide whether wg-quick needs escalating through sudo.
+libc = "0.2"

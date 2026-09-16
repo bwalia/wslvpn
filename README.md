@@ -28,6 +28,11 @@ cargo run -p wsl-cli -- connect --network development
 cargo run -p wsl-cli -- status
 ```
 
+`connect` brings the WireGuard interface up, which needs `wg-quick`
+(`brew install wireguard-tools`) and root — it re-runs itself under `sudo` and
+may prompt. Pass `--no-tunnel` to create the session and write the config
+without touching the interface. See [Client](docs/CLIENT.md).
+
 ## Production
 
 The control plane is deployed with the Helm chart in `deploy/helm/wslvpn`:
@@ -60,6 +65,7 @@ database, so `make test` brings a throwaway PostgreSQL up first.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Client](docs/CLIENT.md)
 - [Authorization](docs/AUTHORIZATION.md)
 - [Security](docs/SECURITY.md) · [Threat model](docs/THREAT-MODEL.md)
 - [Operations](docs/OPERATIONS.md) · [Upgrading](docs/UPGRADING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)

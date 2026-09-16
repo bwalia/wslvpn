@@ -24,8 +24,21 @@ enum Commands {
     Connect {
         #[arg(long)]
         network: Option<String>,
+        /// Write the WireGuard config but do not bring the interface up.
+        #[arg(long)]
+        no_tunnel: bool,
+        /// Never escalate through sudo; fail instead if not already root.
+        #[arg(long)]
+        no_sudo: bool,
     },
-    Disconnect,
+    Disconnect {
+        /// Release the session but leave the interface alone.
+        #[arg(long)]
+        no_tunnel: bool,
+        /// Never escalate through sudo; fail instead if not already root.
+        #[arg(long)]
+        no_sudo: bool,
+    },
     Networks,
     Devices,
     Policy,
@@ -57,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Signed out");
         }
         Commands::Status => {
-            let status = state.status();
+            let status = state.status(&wsl_agent::tunnel::state());
             println!("{}", status.product);
             println!();
             println!("User:       {}", status.user.as_deref().unwrap_or("-"));
@@ -80,10 +93,27 @@ async fn main() -> anyhow::Result<()> {
             if let Some(gw) = status.gateway {
                 println!("Gateway: {gw}");
             }
+            println!(
+                "Interface: {}",
+                status.interface.as_deref().unwrap_or("(down)")
+            );
         }
-        Commands::Connect { network } => {
-            let resp = client.connect(&mut state, network.as_deref()).await?;
-            println!("Connected");
+        Commands::Connect {
+            network,
+            no_tunnel,
+            no_sudo,
+        } => {
+            let resp = if no_tunnel {
+                let resp = client.connect(&mut state, network.as_deref()).await?;
+                println!("Session created; tunnel not started (--no-tunnel).");
+                resp
+            } else {
+                let (resp, tunnel) = client
+                    .connect_and_bring_up(&mut state, network.as_deref(), !no_sudo)
+                    .await?;
+                println!("Connected on {}", tunnel.interface());
+                resp
+            };
             println!("Assigned IP: {}", resp.session.assigned_ip);
             println!(
                 "Policy: {} v{}",
@@ -91,13 +121,20 @@ async fn main() -> anyhow::Result<()> {
                 resp.decision.policy_version.unwrap_or(0)
             );
             println!(
-                "WireGuard config: {}/wsl.conf",
-                AgentState::data_dir()?.display()
+                "WireGuard config: {}",
+                AgentState::wg_conf_path()?.display()
             );
         }
-        Commands::Disconnect => {
-            client.disconnect(&mut state).await?;
-            println!("Disconnected");
+        Commands::Disconnect { no_tunnel, no_sudo } => {
+            if no_tunnel {
+                client.disconnect(&mut state).await?;
+                println!("Session released; interface left alone (--no-tunnel).");
+            } else {
+                client
+                    .disconnect_and_tear_down(&mut state, !no_sudo)
+                    .await?;
+                println!("Disconnected");
+            }
         }
         Commands::Networks => {
             for n in client.list_networks(&state).await? {
@@ -128,6 +165,14 @@ async fn main() -> anyhow::Result<()> {
             println!("device_id={:?}", state.device_id);
             println!("session={:?}", state.session.as_ref().map(|s| s.id));
             println!("data_dir={}", AgentState::data_dir()?.display());
+            println!("wg_conf={}", AgentState::wg_conf_path()?.display());
+            println!(
+                "wg_quick={}",
+                wsl_agent::tunnel::find_wg_quick()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(not found)".into())
+            );
+            println!("tunnel={:?}", wsl_agent::tunnel::state());
         }
     }
     Ok(())
