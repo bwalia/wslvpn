@@ -86,6 +86,20 @@ Three properties come out of that shape:
   process. A local process that watches the loopback request gains nothing. A
   wrong verifier burns the code rather than allowing another attempt.
 
+## Machine-readable output
+
+`wsl status --json` and `wsl networks --json` emit the same data the human
+output is rendered from. The desktop app is built on them.
+
+## Asking for privilege without a terminal
+
+`--gui` on `connect` and `disconnect` replaces the `sudo` prompt with the
+operating system's own authorization dialog — `osascript`'s
+`with administrator privileges` on macOS, `pkexec` elsewhere. It is for callers
+with no terminal, where `sudo` would block forever on a prompt nobody can
+answer. `--no-sudo` still wins over it: a caller that says not to escalate is
+not escalated another way.
+
 ## What `status` reads
 
 The connected/disconnected line comes from the operating system, not from what

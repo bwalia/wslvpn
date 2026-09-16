@@ -8,20 +8,75 @@
   </head>
   <body>
     <main id="app">
-      <section id="signed-out" class="panel">
+      <!-- Nothing is shown until the first status read comes back. The old UI
+           rendered a signed-out screen immediately and then corrected itself,
+           which read as a sign-out to anyone who was already connected. -->
+      <section id="loading" class="panel">
         <h1>WSL Zero Trust</h1>
-        <p>Secure access to your organisation's services</p>
-        <button id="sign-in">Sign in</button>
+        <p>Reading agent status…</p>
       </section>
-      <section id="signed-in" class="panel hidden">
+
+      <section id="signed-out" class="panel" hidden>
+        <h1>WSL Zero Trust</h1>
+        <p>Secure access to your organisation's services.</p>
+        <p class="error" id="signed-out-error" hidden></p>
+        <button id="sign-in">Sign in</button>
+        <p class="hint" id="sign-in-hint" hidden>
+          A browser window is open. Finish signing in there.
+        </p>
+      </section>
+
+      <section id="signed-in" class="panel" hidden>
         <header>
-          <h1>WSL Zero Trust <span id="dot" class="dot"></span></h1>
+          <h1>
+            WSL Zero Trust
+            <span id="dot" class="dot" aria-hidden="true"></span>
+            <span id="tunnel-state" class="state">—</span>
+          </h1>
         </header>
-        <p>Signed in as <strong id="email">—</strong></p>
-        <p>Device <strong id="device">—</strong><br /><span class="ok">✓ Trusted</span></p>
+
+        <dl class="facts">
+          <dt>Signed in as</dt>
+          <dd id="email">—</dd>
+          <dt>Device</dt>
+          <dd id="device">—</dd>
+          <dt>Identity</dt>
+          <dd id="identity">—</dd>
+          <dt>Posture</dt>
+          <dd id="posture">—</dd>
+          <dt>Interface</dt>
+          <dd id="interface">—</dd>
+          <dt id="gateway-label" hidden>Gateway</dt>
+          <dd id="gateway" hidden>—</dd>
+          <dt id="expires-label" hidden>Session expires</dt>
+          <dd id="expires" hidden>—</dd>
+        </dl>
+
         <h2>Networks</h2>
-        <ul id="networks"></ul>
-        <button id="disconnect">Disconnect All</button>
+        <ul id="networks">
+          <li class="empty"><span>No networks</span></li>
+        </ul>
+
+        <p class="error" id="signed-in-error" hidden></p>
+
+        <div class="actions">
+          <label class="field" id="network-field" hidden>
+            <span>Network</span>
+            <select id="network-choice"></select>
+          </label>
+          <button id="connect">Connect</button>
+          <button id="disconnect" class="secondary" hidden>Disconnect</button>
+          <button id="sign-out" class="quiet">Sign out</button>
+        </div>
+      </section>
+
+      <section id="no-cli" class="panel" hidden>
+        <h1>Command-line tool not found</h1>
+        <p id="no-cli-message">
+          The desktop app drives the <code>wsl</code> command-line tool and could
+          not find it.
+        </p>
+        <button id="retry">Try again</button>
       </section>
     </main>
     <script type="module" src="/main.js"></script>

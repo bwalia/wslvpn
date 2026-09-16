@@ -10,7 +10,7 @@ use wsl_types::{
 use crate::oidc;
 use crate::posture;
 use crate::state::AgentState;
-use crate::tunnel::{self, TunnelState};
+use crate::tunnel::{self, Escalation, TunnelState};
 
 pub struct ControlClient {
     http: reqwest::Client,
@@ -175,11 +175,11 @@ impl ControlClient {
         &self,
         state: &mut AgentState,
         network_name: Option<&str>,
-        allow_sudo: bool,
+        escalation: Escalation,
     ) -> Result<(CreateSessionResponse, TunnelState)> {
         let resp = self.connect(state, network_name).await?;
         let conf_path = AgentState::wg_conf_path()?;
-        let tunnel = tunnel::up(&conf_path, allow_sudo).await?;
+        let tunnel = tunnel::up(&conf_path, escalation).await?;
         tracing::info!(interface = %tunnel.interface(), "tunnel up");
         Ok((resp, tunnel))
     }
@@ -192,10 +192,10 @@ impl ControlClient {
     pub async fn disconnect_and_tear_down(
         &self,
         state: &mut AgentState,
-        allow_sudo: bool,
+        escalation: Escalation,
     ) -> Result<()> {
         let conf_path = AgentState::wg_conf_path()?;
-        tunnel::down(&conf_path, allow_sudo).await?;
+        tunnel::down(&conf_path, escalation).await?;
         self.disconnect(state).await
     }
 

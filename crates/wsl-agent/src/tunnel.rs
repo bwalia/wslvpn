@@ -40,13 +40,17 @@ impl Action {
 }
 
 /// How the privilege `wg-quick` needs is going to be obtained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Privilege {
     /// Already root — run `wg-quick` directly.
     Direct,
     /// Not root; re-run through `sudo`, which may prompt.
     Sudo,
-    /// Not root and no `sudo` to escalate with.
+    /// Not root and no terminal to prompt on — ask the desktop for the
+    /// privilege instead, through the operating system's own dialog. Carries
+    /// the binary that will do the asking.
+    Graphical { escalator: PathBuf },
+    /// Not root and no way to escalate.
     Unavailable,
 }
 
@@ -109,16 +113,64 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Decide how to run `wg-quick`. `allow_sudo` lets a caller that cannot field a
-/// password prompt — a GUI, a test — refuse escalation up front.
-pub fn detect_privilege(allow_sudo: bool) -> Privilege {
+/// What a caller is able to do about not being root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Escalation {
+    /// There is a terminal: `sudo` can prompt on it.
+    #[default]
+    Terminal,
+    /// There is no terminal but there is a desktop session: ask the operating
+    /// system to put up its own authorization dialog.
+    Graphical,
+    /// Neither. Fail rather than hang on a prompt nobody can answer.
+    None,
+}
+
+/// Decide how to run `wg-quick`.
+pub fn detect_privilege(escalation: Escalation) -> Privilege {
     if is_root() {
-        Privilege::Direct
-    } else if allow_sudo && search_path("sudo").is_some() {
-        Privilege::Sudo
-    } else {
-        Privilege::Unavailable
+        return Privilege::Direct;
     }
+    match escalation {
+        Escalation::Terminal if search_path("sudo").is_some() => Privilege::Sudo,
+        Escalation::Graphical => match graphical_escalator() {
+            Some(escalator) => Privilege::Graphical { escalator },
+            None => Privilege::Unavailable,
+        },
+        _ => Privilege::Unavailable,
+    }
+}
+
+/// The binary that asks the desktop for privilege.
+///
+/// macOS has no `pkexec`; the equivalent is AppleScript's `with administrator
+/// privileges`, which routes through Authorization Services and puts up the
+/// system dialog. Both prompt the user directly, so neither needs a terminal.
+fn graphical_escalator() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        search_path("osascript").or_else(|| {
+            let fallback = PathBuf::from("/usr/bin/osascript");
+            fallback.is_file().then_some(fallback)
+        })
+    } else {
+        search_path("pkexec")
+    }
+}
+
+/// Quote one argument for a POSIX shell.
+///
+/// `do shell script` hands its string to `/bin/sh`, so the config path — which
+/// on macOS lives under "Application Support" and therefore contains a space —
+/// has to survive a round trip through word splitting. Single quotes take
+/// everything literally; the only character that cannot appear inside them is a
+/// single quote, which is spliced in as `'\''`.
+fn shell_quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', r"'\''"))
+}
+
+/// Escape a string to sit inside an AppleScript double-quoted literal.
+fn applescript_quote(value: &str) -> String {
+    value.replace('\\', r"\\").replace('"', "\\\"")
 }
 
 /// Build the command line without running it, so the argv is testable.
@@ -139,8 +191,30 @@ pub fn plan(
             PathBuf::from("sudo"),
             vec![wg_quick, action.as_str().to_string(), conf],
         )),
+        // pkexec takes an argv and needs no quoting. osascript takes a script,
+        // and the string inside `do shell script` reaches /bin/sh — so the
+        // arguments are shell-quoted first and the result escaped for the
+        // AppleScript literal that carries it.
+        Privilege::Graphical { escalator } => {
+            if escalator.file_name().and_then(|n| n.to_str()) == Some("osascript") {
+                let command = format!(
+                    "{} {} {}",
+                    shell_quote(&wg_quick),
+                    shell_quote(action.as_str()),
+                    shell_quote(&conf)
+                );
+                let script = format!(
+                    "do shell script \"{}\" with administrator privileges",
+                    applescript_quote(&command)
+                );
+                Ok((escalator, vec!["-e".to_string(), script]))
+            } else {
+                Ok((escalator, vec![wg_quick, action.as_str().to_string(), conf]))
+            }
+        }
         Privilege::Unavailable => bail!(
-            "bringing the tunnel {} needs root.\n\
+            "bringing the tunnel {} needs root, and there is no way to ask for it \
+             here.\n\
              Re-run as `sudo wsl {}`, or pass `--no-tunnel` to only write the \
              WireGuard config and manage the interface yourself.",
             action.as_str(),
@@ -153,8 +227,8 @@ pub fn plan(
 }
 
 /// Bring the interface up from a rendered config.
-pub async fn up(conf: &Path, allow_sudo: bool) -> Result<TunnelState> {
-    run(Action::Up, conf, allow_sudo).await?;
+pub async fn up(conf: &Path, escalation: Escalation) -> Result<TunnelState> {
+    run(Action::Up, conf, escalation).await?;
     let state = state();
     if !state.is_up() {
         bail!(
@@ -167,14 +241,14 @@ pub async fn up(conf: &Path, allow_sudo: bool) -> Result<TunnelState> {
 
 /// Tear the interface down. Already-down is success, not an error: a user who
 /// runs `disconnect` twice wants the tunnel gone, and it is.
-pub async fn down(conf: &Path, allow_sudo: bool) -> Result<()> {
+pub async fn down(conf: &Path, escalation: Escalation) -> Result<()> {
     if !state().is_up() {
         return Ok(());
     }
-    run(Action::Down, conf, allow_sudo).await
+    run(Action::Down, conf, escalation).await
 }
 
-async fn run(action: Action, conf: &Path, allow_sudo: bool) -> Result<()> {
+async fn run(action: Action, conf: &Path, escalation: Escalation) -> Result<()> {
     let wg_quick = find_wg_quick().with_context(|| {
         format!(
             "wg-quick not found. Install the WireGuard tools:\n  \
@@ -189,7 +263,7 @@ async fn run(action: Action, conf: &Path, allow_sudo: bool) -> Result<()> {
             conf.display()
         );
     }
-    let (program, args) = plan(action, &wg_quick, conf, detect_privilege(allow_sudo))?;
+    let (program, args) = plan(action, &wg_quick, conf, detect_privilege(escalation))?;
 
     // stdin/stderr are inherited so sudo can prompt for a password and so
     // wg-quick's own diagnostics reach the user unmangled.
@@ -316,13 +390,88 @@ mod tests {
     }
 
     #[test]
-    fn refusing_sudo_leaves_no_way_to_escalate() {
+    fn refusing_escalation_leaves_no_way_to_get_root() {
         if is_root() {
             // Running the suite as root is unusual but not an error; the
             // decision this asserts is only reachable as a normal user.
             return;
         }
-        assert_eq!(detect_privilege(false), Privilege::Unavailable);
+        assert_eq!(detect_privilege(Escalation::None), Privilege::Unavailable);
+    }
+
+    /// A GUI has no terminal, so `sudo` would block on a prompt nobody can
+    /// answer. It must reach for the desktop's own dialog instead.
+    #[test]
+    fn a_graphical_caller_does_not_get_sudo() {
+        if is_root() {
+            return;
+        }
+        assert!(!matches!(
+            detect_privilege(Escalation::Graphical),
+            Privilege::Sudo
+        ));
+    }
+
+    #[test]
+    fn pkexec_takes_an_argv_with_no_quoting() {
+        let (program, args) = plan(
+            Action::Up,
+            Path::new("/usr/bin/wg-quick"),
+            Path::new("/tmp/wsl.conf"),
+            Privilege::Graphical {
+                escalator: PathBuf::from("/usr/bin/pkexec"),
+            },
+        )
+        .expect("pkexec plan");
+        assert_eq!(program, PathBuf::from("/usr/bin/pkexec"));
+        assert_eq!(
+            args,
+            vec![
+                "/usr/bin/wg-quick".to_string(),
+                "up".to_string(),
+                "/tmp/wsl.conf".to_string(),
+            ]
+        );
+    }
+
+    /// The macOS config path contains a space, so the arguments have to survive
+    /// both the AppleScript literal and the /bin/sh that `do shell script` runs.
+    #[test]
+    fn osascript_quotes_a_path_with_a_space_through_both_layers() {
+        let conf = "/Users/x/Library/Application Support/wsl-zerotrust/wsl.conf";
+        let (program, args) = plan(
+            Action::Up,
+            Path::new("/opt/homebrew/bin/wg-quick"),
+            Path::new(conf),
+            Privilege::Graphical {
+                escalator: PathBuf::from("/usr/bin/osascript"),
+            },
+        )
+        .expect("osascript plan");
+        assert_eq!(program, PathBuf::from("/usr/bin/osascript"));
+        assert_eq!(args[0], "-e");
+        assert_eq!(
+            args[1],
+            "do shell script \"'/opt/homebrew/bin/wg-quick' 'up' \
+             '/Users/x/Library/Application Support/wsl-zerotrust/wsl.conf'\" \
+             with administrator privileges"
+                .replace("\n", "")
+        );
+    }
+
+    #[test]
+    fn shell_quoting_survives_a_quote_in_the_path() {
+        // A home directory can contain an apostrophe. Closing the quote,
+        // escaping one, and reopening is the only way through single quotes.
+        assert_eq!(
+            shell_quote("/Users/o'brien/wsl.conf"),
+            r"'/Users/o'\''brien/wsl.conf'"
+        );
+    }
+
+    #[test]
+    fn applescript_quoting_escapes_backslashes_before_quotes() {
+        assert_eq!(applescript_quote(r#"a\b"c"#), r#"a\\b\"c"#);
     }
 
     #[test]
