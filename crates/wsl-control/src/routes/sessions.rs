@@ -1,6 +1,7 @@
 use crate::auth::service_token::OpsAuth;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::sessions::SessionService;
 use crate::state::AppState;
 use axum::{
@@ -11,8 +12,18 @@ use std::net::IpAddr;
 use uuid::Uuid;
 use wsl_types::{CreateSessionRequest, CreateSessionResponse, Session, SessionIdentity};
 
-pub async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<Session>>> {
-    Ok(Json(SessionService::new(state).list().await?))
+/// An admin sees every session; a member sees only their own.
+pub async fn list(
+    State(state): State<AppState>,
+    caller: AuthUser,
+) -> AppResult<Json<Vec<Session>>> {
+    let svc = SessionService::new(state);
+    let sessions = if caller.is_admin() {
+        svc.list().await?
+    } else {
+        svc.list_for_user(caller.user_id).await?
+    };
+    Ok(Json(sessions))
 }
 
 pub async fn create(
@@ -50,13 +61,26 @@ pub async fn identity_by_ip(
         .ok_or(AppError::NotFound)
 }
 
+/// A user may end their own session; an admin may end anyone's.
 pub async fn revoke(
     State(state): State<AppState>,
+    caller: AuthUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let ok = SessionService::new(state).revoke(id).await?;
-    if !ok {
+    let svc = SessionService::new(state.clone());
+    let owner = svc.owner_of(id).await?.ok_or(AppError::NotFound)?;
+    caller.authorize_owner(owner)?;
+    if !svc.revoke(id).await? {
         return Err(AppError::NotFound);
     }
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("session.revoke")
+                .decision("allow")
+                .by_user(caller.user_id, &caller.email)
+                .subject(owner)
+                .resource(id.to_string()),
+        )
+        .await?;
     Ok(Json(serde_json::json!({ "revoked": true })))
 }

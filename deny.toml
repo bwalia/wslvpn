@@ -1,0 +1,47 @@
+# Supply-chain policy, enforced by `cargo deny check` in CI.
+
+[advisories]
+# Any unfixed advisory against a dependency fails the build. Exceptions belong
+# in `ignore` with a dated justification, not in a relaxed default.
+yanked = "deny"
+ignore = [
+    # See .cargo/audit.toml for the full justification: `rsa` is present in
+    # Cargo.lock via sqlx-mysql, which this workspace never compiles - sqlx is
+    # built with default-features = false and the postgres driver only.
+    # No fixed version exists upstream. Last checked: 2026-09-01.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+# Permissive licences only. A copyleft dependency arriving transitively is a
+# distribution question that should be a deliberate decision, not a surprise.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+    # webpki-roots ships Mozilla's CA trust store as data, licensed CDLA-
+    # Permissive-2.0. It is a permissive data licence: redistribution is
+    # unconditional and it attaches no terms to the software that reads the
+    # data. It reaches us through sqlx-core, hyper-rustls and reqwest.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::services::audit::AuditService;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::groups::GroupService;
 use crate::services::ipam::IpamService;
 use crate::services::networks::NetworkService;
@@ -26,6 +26,21 @@ impl SessionService {
     pub async fn list(&self) -> AppResult<Vec<Session>> {
         let rows = self.fetch_sessions(None).await?;
         Ok(rows)
+    }
+
+    /// Sessions belonging to one user, for a member reading their own.
+    pub async fn list_for_user(&self, user_id: Uuid) -> AppResult<Vec<Session>> {
+        self.fetch_sessions(Some(user_id)).await
+    }
+
+    /// Who owns a session, for ownership checks before revocation.
+    pub async fn owner_of(&self, session_id: Uuid) -> AppResult<Option<Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT user_id FROM sessions WHERE id = $1")
+                .bind(session_id)
+                .fetch_optional(&self.state.db)
+                .await?,
+        )
     }
 
     pub async fn create(
@@ -97,19 +112,17 @@ impl SessionService {
         metrics::counter!("wsl_policy_decisions").increment(1);
         if !decision.allow {
             metrics::counter!("wsl_policy_denials").increment(1);
-            AuditService::new(self.state.clone())
-                .record(
-                    "session.create",
-                    Some("deny"),
-                    Some(user_id),
-                    Some(req.device_id),
-                    Some(&network.name),
-                    decision.policy_id,
-                    decision.policy_version,
-                    decision.git_commit.as_deref(),
-                    serde_json::json!({ "reason": decision.reason }),
-                )
-                .await?;
+            let mut entry = AuditEntry::new("session.create")
+                .decision("deny")
+                .by_user(user_id, user_email)
+                .device(req.device_id)
+                .resource(&network.name)
+                .git_commit(decision.git_commit.as_deref())
+                .details(serde_json::json!({ "reason": decision.reason }));
+            if let (Some(id), Some(version)) = (decision.policy_id, decision.policy_version) {
+                entry = entry.policy(id, version);
+            }
+            AuditService::new(self.state.clone()).record(entry).await?;
             return Err(AppError::Forbidden);
         }
 
@@ -185,19 +198,21 @@ impl SessionService {
         .execute(&self.state.db)
         .await?;
 
-        AuditService::new(self.state.clone())
-            .record(
-                "session.create",
-                Some("allow"),
-                Some(user_id),
-                Some(req.device_id),
-                Some(&network.name),
-                decision.policy_id,
-                decision.policy_version,
-                decision.git_commit.as_deref(),
-                serde_json::json!({ "session_id": session_id, "assigned_ip": assigned }),
-            )
-            .await?;
+        let mut entry = AuditEntry::new("session.create")
+            .decision("allow")
+            .by_user(user_id, user_email)
+            .device(req.device_id)
+            .resource(&network.name)
+            .git_commit(decision.git_commit.as_deref())
+            .details(serde_json::json!({
+                "session_id": session_id,
+                "assigned_ip": assigned,
+                "expires_at": expires_at,
+            }));
+        if let (Some(id), Some(version)) = (decision.policy_id, decision.policy_version) {
+            entry = entry.policy(id, version);
+        }
+        AuditService::new(self.state.clone()).record(entry).await?;
 
         metrics::counter!("wsl_active_sessions").increment(1);
 

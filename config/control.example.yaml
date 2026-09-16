@@ -1,6 +1,15 @@
+# Local development configuration.
+#
+# Every secret below may be written as ${ENV_VAR}; the value is read from the
+# process environment at startup and an unset variable is a startup error rather
+# than a silent empty string. Keep real secrets out of this file.
+
 server:
   listen: "0.0.0.0:8080"
   public_url: "http://localhost:8080"
+  # Swagger UI and the OpenAPI document enumerate the whole API surface.
+  # Leave this false anywhere that is not a developer's machine.
+  expose_docs: true
 
 product:
   namespace: wsl
@@ -8,8 +17,17 @@ product:
 
 database:
   url: "postgres://wsl:wsl@localhost:5433/wsl"
+  max_connections: 20
+  min_connections: 2
+  acquire_timeout_secs: 5
+  idle_timeout_secs: 300
+  max_lifetime_secs: 1800
 
 identity:
+  # Mints a session for any email with no credential. Refused unless
+  # server.public_url is loopback, and the process refuses to start if this is
+  # true on a non-loopback deployment.
+  dev_login_enabled: true
   oidc:
     issuer: "http://localhost:5556/dex"
     client_id: "wsl-client"
@@ -27,6 +45,29 @@ gitops:
   enabled: true
   path: "./gitops/examples"
 
+security:
+  rate_limit:
+    # Credential-checking endpoints: the OIDC handshake and dev login.
+    auth:
+      enabled: true
+      requests: 20
+      window_secs: 60
+    # The authenticated API surface.
+    api:
+      enabled: true
+      requests: 600
+      window_secs: 60
+
 bootstrap:
+  # Machine provisioning credential (/api/v1/ops).
   ops_service_token: "dev-ops-token-change-me"
+  # Shared secret a gateway presents on first enrollment. Each gateway is then
+  # issued its own credential, which is what it uses from then on.
   gateway_registration_token: "dev-gateway-token-change-me"
+  # SCIM provisioning credential, held by the IdP. Omit it entirely if SCIM is
+  # not in use — any previously seeded SCIM token is deactivated at startup.
+  scim_service_token: "dev-scim-token-change-me"
+  # The only way an administrator comes into existence. Reconciled on every
+  # start: adding an address grants the role, removing one takes it away.
+  admin_emails:
+    - "alice@example.com"

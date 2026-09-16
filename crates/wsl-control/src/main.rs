@@ -1,18 +1,9 @@
-#![allow(clippy::type_complexity)]
-
-mod auth;
-mod config;
-mod error;
-mod openapi;
-mod routes;
-mod services;
-mod state;
-
 use anyhow::Context;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use wsl_control::{config, routes, state};
 
 #[derive(Debug, Parser)]
 #[command(name = "wsl-control", about = "WSL Zero Trust VPN control plane")]
@@ -53,6 +44,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "wsl-control listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` is what puts the peer address in
+    // request extensions; the rate limiter keys on it, and without this every
+    // client would share a single bucket.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(routes::shutdown_signal())
+    .await?;
+    tracing::info!("drained; exiting");
     Ok(())
 }

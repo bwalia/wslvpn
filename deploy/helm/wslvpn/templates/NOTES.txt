@@ -1,0 +1,40 @@
+{{ .Chart.Name }} {{ .Chart.Version }} deployed as {{ include "wslvpn.fullname" . }}.
+
+Before this is usable:
+
+1. The Secret {{ .Values.secrets.existingSecret }} must exist with these keys:
+     {{ .Values.secrets.keys.databaseUrl }}
+     {{ .Values.secrets.keys.oidcClientSecret }}
+     {{ .Values.secrets.keys.opsServiceToken }}
+     {{ .Values.secrets.keys.gatewayRegistrationToken }}
+     {{ .Values.secrets.keys.scimServiceToken }}
+   A missing key is a startup error, not a warning.
+
+{{- if not .Values.config.adminEmails }}
+
+2. config.adminEmails is empty, so no one can reach the administrative API.
+   Set it and upgrade:
+
+     helm upgrade {{ .Release.Name }} ... --set config.adminEmails[0]=you@example.com
+{{- else }}
+
+2. Administrators ({{ len .Values.config.adminEmails }}): reconciled from
+   config.adminEmails on every start. Removing an address revokes the role.
+{{- end }}
+
+3. Check readiness:
+
+     kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "wslvpn.fullname" . }} -- \
+       wget -qO- localhost:8080/readyz
+
+{{- if .Values.config.exposeDocs }}
+
+WARNING: config.exposeDocs is true. The OpenAPI document enumerates every route
+and schema on the control plane. Turn it off outside development.
+{{- end }}
+{{- if not .Values.ingress.tls.enabled }}
+
+WARNING: ingress TLS is disabled. Session bearer tokens travel on these
+requests in cleartext.
+{{- end }}

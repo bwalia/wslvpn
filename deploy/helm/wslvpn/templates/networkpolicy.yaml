@@ -1,0 +1,51 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Deny by default, then permit exactly what the control plane needs: inbound HTTP
+from the ingress controller and any namespace named in values, outbound DNS,
+PostgreSQL, and HTTPS to the identity provider. Anything else the process tries
+to reach is a bug or a compromise, and either way it should not succeed.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "wslvpn.fullname" . }}
+  labels:
+    {{- include "wslvpn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "wslvpn.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.allowedIngressNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # Identity provider (OIDC discovery, JWKS, token exchange)
+    - to:
+        {{- range .Values.networkPolicy.identityEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+{{- end }}

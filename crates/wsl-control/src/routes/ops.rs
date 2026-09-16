@@ -1,6 +1,6 @@
 use crate::auth::OpsAuth;
 use crate::error::{AppError, AppResult};
-use crate::services::audit::AuditService;
+use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::devices::DeviceService;
 use crate::services::groups::GroupService;
 use crate::services::sessions::SessionService;
@@ -37,57 +37,97 @@ async fn list_users(State(state): State<AppState>, _ops: OpsAuth) -> AppResult<J
 
 async fn create_user(
     State(state): State<AppState>,
-    _ops: OpsAuth,
+    ops: OpsAuth,
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<User>> {
-    Ok(Json(UserService::new(state).create(body).await?))
+    let user = UserService::new(state.clone()).create(body).await?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.create")
+                .decision("allow")
+                .by_service(&ops.token_name)
+                .subject(user.id)
+                .resource(&user.email),
+        )
+        .await?;
+    Ok(Json(user))
 }
 
 async fn disable_user(
     State(state): State<AppState>,
-    _ops: OpsAuth,
+    ops: OpsAuth,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<User>> {
-    UserService::new(state)
+    let user = UserService::new(state.clone())
         .update(
             id,
             UpdateUserRequest {
                 display_name: None,
                 active: Some(false),
+                // Enabling and disabling is an account-lifecycle action.
+                // Granting the admin role is not, and a provisioning token
+                // must not be a path to one.
+                role: None,
             },
         )
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.disable")
+                .decision("allow")
+                .by_service(&ops.token_name)
+                .subject(user.id)
+                .resource(&user.email),
+        )
+        .await?;
+    Ok(Json(user))
 }
 
 async fn enable_user(
     State(state): State<AppState>,
-    _ops: OpsAuth,
+    ops: OpsAuth,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<User>> {
-    UserService::new(state)
+    let user = UserService::new(state.clone())
         .update(
             id,
             UpdateUserRequest {
                 display_name: None,
                 active: Some(true),
+                role: None,
             },
         )
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.enable")
+                .decision("allow")
+                .by_service(&ops.token_name)
+                .subject(user.id)
+                .resource(&user.email),
+        )
+        .await?;
+    Ok(Json(user))
 }
 
 async fn delete_user(
     State(state): State<AppState>,
-    _ops: OpsAuth,
+    ops: OpsAuth,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let ok = UserService::new(state).delete(id).await?;
-    if !ok {
+    if !UserService::new(state.clone()).delete(id).await? {
         return Err(AppError::NotFound);
     }
+    AuditService::new(state)
+        .record(
+            AuditEntry::new("user.delete")
+                .decision("allow")
+                .by_service(&ops.token_name)
+                .subject(id),
+        )
+        .await?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 

@@ -1,0 +1,27 @@
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published advisory is found against unchanged code
+    # rather than waiting for the next commit to touch it.
+    - cron: "0 3 * * 1"
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+      - run: cargo build --workspace
+      - uses: github/codeql-action/analyze@v3

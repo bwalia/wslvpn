@@ -1,0 +1,64 @@
+# Production template.
+#
+# Secrets are read from the environment rather than written here, so this file
+# is safe to keep in version control. A referenced variable that is not set is a
+# startup error.
+#
+# The control plane speaks plain HTTP and expects TLS to be terminated in front
+# of it (ingress controller, load balancer, or service mesh). It must never be
+# exposed directly to an untrusted network.
+
+server:
+  listen: "0.0.0.0:8080"
+  public_url: "https://vpn.example.com"
+  expose_docs: false
+
+product:
+  namespace: wsl
+  display_name: "WSL Zero Trust VPN"
+
+database:
+  # sslmode=require at minimum; verify-full where the CA is available.
+  url: "${WSL_DATABASE_URL}"
+  max_connections: 25
+  min_connections: 5
+  acquire_timeout_secs: 5
+  idle_timeout_secs: 300
+  max_lifetime_secs: 1800
+
+identity:
+  dev_login_enabled: false
+  oidc:
+    issuer: "${WSL_OIDC_ISSUER}"
+    client_id: "${WSL_OIDC_CLIENT_ID}"
+    client_secret: "${WSL_OIDC_CLIENT_SECRET}"
+    scopes:
+      - openid
+      - profile
+      - email
+    redirect_uri: "https://vpn.example.com/auth/oidc/callback"
+
+wireguard:
+  default_port: 51820
+
+gitops:
+  enabled: true
+  path: "/etc/wsl/gitops"
+
+security:
+  rate_limit:
+    auth:
+      enabled: true
+      requests: 20
+      window_secs: 60
+    api:
+      enabled: true
+      requests: 600
+      window_secs: 60
+
+bootstrap:
+  ops_service_token: "${WSL_OPS_SERVICE_TOKEN}"
+  gateway_registration_token: "${WSL_GATEWAY_REGISTRATION_TOKEN}"
+  scim_service_token: "${WSL_SCIM_SERVICE_TOKEN}"
+  admin_emails:
+    - "security@example.com"

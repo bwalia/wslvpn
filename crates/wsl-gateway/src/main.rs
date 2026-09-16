@@ -1,5 +1,6 @@
 mod apply;
 mod config;
+mod enrollment;
 mod firewall;
 mod wg;
 
@@ -8,7 +9,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use wsl_types::{GatewayHeartbeatRequest, RegisterGatewayRequest};
+use wsl_types::{GatewayHeartbeatRequest, RegisterGatewayRequest, RegisterGatewayResponse};
 
 #[derive(Debug, Parser)]
 #[command(name = "wsl-gateway", about = "WSL Zero Trust VPN gateway")]
@@ -62,27 +63,17 @@ async fn main() -> anyhow::Result<()> {
         (Some(kp.private_key_b64.clone()), kp.public_key_b64)
     };
 
-    let register = RegisterGatewayRequest {
-        name: cfg.gateway.name.clone(),
-        public_key: keypair.1.clone(),
-        endpoint: cfg.gateway.endpoint.clone(),
-        network_id: cfg.gateway.network_id,
-        token: cfg.control.registration_token.clone(),
+    // Resume with the stored credential when there is one. Enrolling on every
+    // start would mint a fresh credential each time and, on a control plane
+    // where the shared enrollment secret has been retired, would not work at
+    // all.
+    let mut enrolled = match enrollment::load(&cfg.wireguard.state_dir) {
+        Some(e) => {
+            tracing::info!(gateway_id = %e.gateway_id, "resuming with stored credential");
+            e
+        }
+        None => enroll(&http, &cfg, &keypair.1).await?,
     };
-
-    let gw: wsl_types::Gateway = http
-        .post(format!(
-            "{}/api/v1/gateways/register",
-            cfg.control.url.trim_end_matches('/')
-        ))
-        .json(&register)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    tracing::info!(gateway_id = %gw.id, "registered with control plane");
 
     let mut last_version = -1i64;
     let mut peer_count = 0i32;
@@ -92,20 +83,36 @@ async fn main() -> anyhow::Result<()> {
             peer_count,
             healthy: true,
         };
-        let config: Result<wsl_types::GatewayConfig, _> = async {
-            http.post(format!(
+        let response = http
+            .post(format!(
                 "{}/api/v1/gateways/{}/heartbeat",
                 cfg.control.url.trim_end_matches('/'),
-                gw.id
+                enrolled.gateway_id
             ))
+            .bearer_auth(&enrolled.auth_token)
             .json(&hb)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
+            .await;
+
+        // A rejected credential is recoverable: it means the control plane
+        // rotated this gateway's token, or the gateway was deleted and
+        // recreated. Discard the stored copy and enroll again rather than
+        // heartbeating forever against a 401.
+        if let Ok(r) = &response {
+            if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+                tracing::warn!("credential rejected; re-enrolling");
+                enrollment::clear(&cfg.wireguard.state_dir);
+                match enroll(&http, &cfg, &keypair.1).await {
+                    Ok(e) => enrolled = e,
+                    Err(e) => tracing::error!(error = %e, "re-enrollment failed; retrying"),
+                }
+                tokio::time::sleep(Duration::from_secs(cfg.control.heartbeat_secs)).await;
+                continue;
+            }
         }
-        .await;
+
+        let config: Result<wsl_types::GatewayConfig, reqwest::Error> =
+            async { response?.error_for_status()?.json().await }.await;
 
         // A transient control-plane or `wg` failure must not take the gateway
         // down: retry on the next heartbeat with the last applied version
@@ -148,4 +155,47 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::time::sleep(Duration::from_secs(cfg.control.heartbeat_secs)).await;
     }
+}
+
+/// Enroll with the control plane and persist the credential it returns.
+async fn enroll(
+    http: &reqwest::Client,
+    cfg: &config::GatewayConfigFile,
+    public_key: &str,
+) -> anyhow::Result<enrollment::Enrollment> {
+    let register = RegisterGatewayRequest {
+        name: cfg.gateway.name.clone(),
+        public_key: public_key.to_string(),
+        endpoint: cfg.gateway.endpoint.clone(),
+        network_id: cfg.gateway.network_id,
+        token: cfg.control.registration_token.clone(),
+    };
+
+    let response = http
+        .post(format!(
+            "{}/api/v1/gateways/register",
+            cfg.control.url.trim_end_matches('/')
+        ))
+        .json(&register)
+        .send()
+        .await?;
+
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        anyhow::bail!(
+            "the control plane already knows a gateway named '{}' and this host cannot \
+             prove possession of its credential. Rotate it (POST /api/v1/gateways/{{id}}/rotate-token \
+             as an administrator) and place the new value in {}, or enroll under a different name.",
+            cfg.gateway.name,
+            enrollment::path(&cfg.wireguard.state_dir).display()
+        );
+    }
+
+    let registered: RegisterGatewayResponse = response.error_for_status()?.json().await?;
+    let enrolled = enrollment::Enrollment {
+        gateway_id: registered.gateway.id,
+        auth_token: registered.auth_token,
+    };
+    enrollment::store(&cfg.wireguard.state_dir, &enrolled)?;
+    tracing::info!(gateway_id = %enrolled.gateway_id, "enrolled with control plane");
+    Ok(enrolled)
 }

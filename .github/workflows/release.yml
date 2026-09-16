@@ -1,0 +1,149 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+  # Required for keyless signing: the OIDC token is what Sigstore binds the
+  # signature to, so a consumer can verify which workflow in which repository
+  # produced an artifact rather than trusting a long-lived key.
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Never publish something that has not passed the same gates as a pull
+  # request. A tag is not evidence that the code is good.
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wsl
+          POSTGRES_PASSWORD: wsl
+          POSTGRES_DB: wsl
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wsl -d wsl"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://wsl:wsl@localhost:5432/wsl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  images:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: wsl-control
+            dockerfile: deploy/compose/Dockerfile.control
+          - name: wsl-gateway
+            dockerfile: deploy/compose/Dockerfile.gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Reproducible-ish: pin the source revision into the image so a
+          # deployed digest can be traced back to a commit.
+          provenance: mode=max
+          sbom: true
+
+      # Signs the digest, not the tag. A tag can be moved to point at a
+      # different image; a digest cannot.
+      - uses: sigstore/cosign-installer@v3
+      - name: sign the image digest
+        run: |
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}"
+
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  sbom:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-cyclonedx --locked
+      - run: cargo cyclonedx --format json --all
+      - name: collect
+        run: |
+          mkdir -p dist
+          find . -name '*.cdx.json' -not -path './dist/*' -exec cp {} dist/ \;
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/*.cdx.json
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.cdx.json
+
+  chart:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/wslvpn
+      - name: package and publish the chart
+        run: |
+          helm package deploy/helm/wslvpn --destination dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ${{ env.REGISTRY }} \
+              --username ${{ github.actor }} --password-stdin
+          helm push dist/wslvpn-*.tgz \
+            "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"
