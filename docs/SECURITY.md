@@ -7,7 +7,8 @@ Security is prioritized over convenience.
 | Area | Control |
 | --- | --- |
 | Transport | TLS terminated in front of the control plane; it speaks plain HTTP and must never face an untrusted network directly |
-| Interactive login | OIDC Authorization Code + PKCE |
+| Interactive login | OIDC Authorization Code + PKCE; the `id_token` is verified against the provider's JWKS, with `iss`, `aud`, `exp`, `nonce` and `email_verified` all enforced — see [OIDC.md](OIDC.md) |
+| Identity keying | `(issuer, sub)` from the provider; email is a mutable attribute, never an authorization key |
 | Authorization | Per-route guards, two roles, scoped service credentials — see [AUTHORIZATION.md](AUTHORIZATION.md) |
 | Machine credentials | Scoped service tokens, SHA-256 at rest, never readable back |
 | Gateways | Per-gateway credentials; re-enrollment requires proof of possession |

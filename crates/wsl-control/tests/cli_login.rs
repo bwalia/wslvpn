@@ -87,6 +87,33 @@ async fn a_loopback_redirect_starts_a_native_login(pool: PgPool) {
     assert_eq!(challenge.as_deref(), Some(CHALLENGE));
 }
 
+/// Starting a login now reads the provider's discovery document, so it depends on
+/// the provider being reachable in a way it did not before — when the endpoints
+/// were assembled from the issuer by string concatenation.
+///
+/// That dependency should fail closed and be visible. This test exists because
+/// the suite first shipped without it and passed locally only because a provider
+/// happened to be running on the machine; CI, which has none, failed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_login_fails_closed_when_the_provider_is_unreachable(pool: PgPool) {
+    let app = app_without_provider(pool.clone()).await;
+    let (status, _) = get("/auth/oidc/authorize").send(&app).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreachable provider must refuse the login, not start one"
+    );
+
+    let states: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_auth_states")
+        .fetch_one(&pool)
+        .await
+        .expect("count auth states");
+    assert_eq!(
+        states, 0,
+        "a handshake that cannot be completed must not leave a state row behind"
+    );
+}
+
 /// The browser flow is unchanged: no client redirect, no challenge recorded.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_configured_redirect_is_still_a_browser_login(pool: PgPool) {

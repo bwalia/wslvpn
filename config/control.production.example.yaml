@@ -37,6 +37,18 @@ identity:
       - profile
       - email
     redirect_uri: "https://vpn.example.com/auth/oidc/callback"
+    # Tolerance when comparing an id_token's exp and iat to local time.
+    clock_skew_secs: 60
+    # Set when the control plane reaches the provider at a different address
+    # from the issuer — an in-cluster provider addressed by service DNS while
+    # its tokens name the public hostname. Only the address dialled changes;
+    # the issuer is still checked against discovery and every token's iss.
+    # internal_url: "http://dex.identity.svc:5556/dex"
+    # Uncomment to allow the iOS client to sign in. Schemes must derive from a
+    # domain name you control; a bare word is refused because private-use
+    # schemes are first come, first served. See docs/IOS.md.
+    # native_schemes:
+    #   - io.wsl.zerotrust
 
 wireguard:
   default_port: 51820

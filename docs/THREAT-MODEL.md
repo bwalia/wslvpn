@@ -40,6 +40,12 @@
 | Gateway takeover with the shared enrollment secret | Re-enrolling an existing name requires proof of possession of its current credential |
 | One gateway reading another's peers | The config served is for the id the credential resolves to, never the id in the URL |
 | Privilege escalation through directory sync | SCIM and ops credentials cannot set a role; provisioned accounts arrive as members |
+| A token minted for another application at the same provider | `aud` is checked against `client_id`; an unchecked audience made any such token a login here |
+| A forged or unsigned `id_token` | Signature verified against the provider's published keys, with an asymmetric algorithm allowlist so `alg: none` is refused before a key is selected |
+| Replay of a captured `id_token` | A nonce generated per handshake must come back inside the signed token |
+| Becoming an administrator by claiming their address | `bootstrap.admin_emails` grants by address, so identity is bound to the provider's `sub` and an unverified `email` claim is refused outright |
+| Account takeover by re-registering a victim's address at the provider | A user already bound to an issuer is never linked to a second subject from it |
+| Login undoing a deprovisioning | Signing in never reactivates a deactivated user |
 | Arbitrary file read via GitOps apply | The directory comes from configuration, not the request body |
 | Audit history rewritten to hide an action | Append-only triggers, plus a hash chain that makes any edit or deletion detectable |
 | Online guessing of tokens or OIDC state | Per-client rate limits on credential-checking endpoints |

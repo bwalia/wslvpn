@@ -39,6 +39,16 @@ data:
           - {{ . }}
           {{- end }}
         redirect_uri: "{{ .Values.config.publicUrl }}/auth/oidc/callback"
+        clock_skew_secs: {{ .Values.config.oidc.clockSkewSecs }}
+        {{- with .Values.config.oidc.internalUrl }}
+        internal_url: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.config.oidc.nativeSchemes }}
+        native_schemes:
+          {{- range . }}
+          - {{ . }}
+          {{- end }}
+        {{- end }}
 
     wireguard:
       default_port: {{ .Values.config.wireguard.defaultPort }}

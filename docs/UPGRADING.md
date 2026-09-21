@@ -1,5 +1,82 @@
 # Upgrading
 
+## To the release that verifies the id_token
+
+The OIDC callback used to decode the `id_token` without checking its signature,
+audience, issuer, expiry or nonce, and treated the `email` claim as the identity.
+Combined with `bootstrap.admin_emails`, which grants the admin role by address,
+a token bearing an administrator's address made its bearer an administrator — and
+a token minted for a *different* application at the same provider was accepted
+too. All of that is now verified.
+
+**Logins that used to succeed can now fail, and they will fail closed.** Read
+this before upgrading a deployment whose provider you do not control.
+
+### What changed
+
+| Change | Effect |
+| --- | --- |
+| Endpoints come from discovery | `/.well-known/openid-configuration` must be reachable *from the control plane*. Endpoints are no longer guessed as `{issuer}/auth` and `{issuer}/token` |
+| Signature is verified | The provider must publish a usable `jwks_uri` and sign with an asymmetric algorithm (`RS*`, `PS*`, `ES256/384`) |
+| `aud` must equal `client_id` | A token issued to another client at the same provider is now refused |
+| `iss` must equal the configured issuer | Including the trailing-slash-insensitive exact string |
+| `nonce` must round-trip | Enforced automatically; no configuration |
+| **`email_verified` must be true** | A provider that omits it refuses *every* login. The most likely upgrade failure |
+| Identity is `(issuer, sub)` | Email became a mutable attribute |
+| Login no longer reactivates | A deactivated user signing in stays deactivated |
+
+### Before upgrading
+
+Check the three things that break deployments, against your own provider:
+
+```bash
+# 1. Discovery is reachable from where the control plane runs, and its
+#    issuer matches what you configured.
+curl -s "$ISSUER/.well-known/openid-configuration" | jq '.issuer, .jwks_uri'
+
+# 2. Keys are published and asymmetric.
+curl -s "$(curl -s "$ISSUER/.well-known/openid-configuration" | jq -r .jwks_uri)" \
+  | jq '.keys[] | {kty, alg, kid}'
+
+# 3. Your provider sends email_verified. Decode any id_token it issues:
+#    the claim must be present and true.
+```
+
+If the control plane reaches the provider at a different address than the issuer
+names — an in-cluster provider on service DNS, or the compose stack where the
+browser sees `localhost:5556` and the container sees `dex:5556` — set
+`identity.oidc.internal_url`. It changes only the address dialled for the token
+and JWKS endpoints; the issuer is still checked strictly.
+
+If your provider does not send `email_verified`, do not work around it by
+relaxing the check. It is what stands between an address claimed at a provider
+with open registration and `bootstrap.admin_emails`. Configure the provider to
+send it, or scope who can register there.
+
+### Migration
+
+`006_oidc_identity_binding.sql` adds `oidc_identities` and a `nonce` column. It
+is additive and needs no downtime.
+
+A login that was *in flight* across the upgrade — started against the old binary,
+finished against the new one — has no nonce recorded and is refused with "stale
+login attempt; start again". The handshake row expires in ten minutes, so this
+clears itself; the person signs in again. It fails closed deliberately, because a
+nonce check that could be disabled by the absence of a value is one worth
+reproducing.
+
+Existing users have **no binding**, because none was ever recorded. Their first
+login after the upgrade re-links them by verified email — the provisioned-user
+path — and is recorded in the audit log as `linked identity provider subject to
+user`. Nothing is required of an operator, but expect one link event per user.
+
+### Rolling back
+
+The migration is additive, so the previous binary runs against the new schema
+unchanged. It will also resume accepting unverified tokens, which is the
+vulnerability this release closes — roll back only to restore service, and treat
+the window as one in which any token from the configured issuer is a valid login.
+
 ## To the release that makes device posture real
 
 Posture used to be four hardcoded values. `disk_encryption` was always

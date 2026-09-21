@@ -37,6 +37,14 @@ identity:
       - profile
       - email
     redirect_uri: "http://localhost:8080/auth/oidc/callback"
+    # Tolerance when comparing an id_token's exp and iat to local time.
+    clock_skew_secs: 60
+    # Private-use URI schemes a native app may be sent back to. A phone cannot
+    # listen on loopback the way the CLI does, so this is how the iOS client
+    # completes a login (RFC 8252 section 7.1). Empty means no mobile client
+    # can sign in, which is the right default for a deployment without one.
+    native_schemes:
+      - io.wsl.zerotrust
 
 wireguard:
   default_port: 51820
