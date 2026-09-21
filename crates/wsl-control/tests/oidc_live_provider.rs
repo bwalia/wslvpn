@@ -108,10 +108,13 @@ async fn a_real_provider_token_verifies() {
         !identity.subject.is_empty(),
         "the provider must supply a stable subject"
     );
+    // Asserted without printing the value. The address comes out of a real
+    // token, and a failing assertion writes its message to the test output —
+    // which is a transcript that gets pasted into issues and CI logs. There is no
+    // reason for someone's address to travel that far.
     assert!(
         identity.email.contains('@'),
-        "expected an email claim, got {:?}",
-        identity.email
+        "the provider must supply an email claim"
     );
 }
 

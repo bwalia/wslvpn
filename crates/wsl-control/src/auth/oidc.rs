@@ -158,6 +158,12 @@ pub async fn authorize(
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
+    // Resolved before the handshake is recorded. A provider that cannot be
+    // reached should not leave a state row behind: this endpoint takes no
+    // credential, so a write that happens before the first thing that can fail
+    // turns a provider outage into unauthenticated rows in the table.
+    let metadata = discover(&state).await?;
+
     sqlx::query(
         r#"
         INSERT INTO oidc_auth_states
@@ -176,11 +182,9 @@ pub async fn authorize(
     .execute(&state.db)
     .await?;
 
+    // The authorize endpoint comes from discovery rather than being assumed to
+    // sit at `{issuer}/auth`. That assumption held for Dex and for nothing else.
     let oidc = &state.config.identity.oidc;
-    // Ask the provider where its authorize endpoint is rather than assuming it
-    // sits at `{issuer}/auth`. That assumption held for Dex and for nothing
-    // else.
-    let metadata = discover(&state).await?;
     let mut url = url::Url::parse(&metadata.authorization_endpoint)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("provider authorize endpoint: {e}")))?;
 

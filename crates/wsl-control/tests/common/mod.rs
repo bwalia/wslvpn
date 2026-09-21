@@ -13,6 +13,7 @@ use http_body_util::BodyExt;
 use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
+use wsl_control::auth::oidc_provider::ProviderMetadata;
 use wsl_control::config::{
     BootstrapConfig, Config, DatabaseConfig, GitOpsConfig, IdentityConfig, OidcConfig,
     ProductConfig, SecurityConfig, ServerConfig, WireGuardConfig,
@@ -44,7 +45,12 @@ pub fn test_config() -> Config {
         },
         identity: IdentityConfig {
             oidc: OidcConfig {
-                issuer: "http://localhost:5556/dex".into(),
+                // Deliberately unreachable. The handshake tests preload the
+                // discovery document, so nothing here should ever open a
+                // connection to a provider; pointing the issuer at a dead port
+                // means a code path that tries to fails loudly instead of
+                // quietly passing on a machine that happens to run one.
+                issuer: TEST_ISSUER.into(),
                 client_id: "test".into(),
                 client_secret: None,
                 scopes: vec!["openid".into()],
@@ -74,7 +80,35 @@ pub fn test_config() -> Config {
     }
 }
 
+/// An issuer nothing listens on. See `test_config`.
+pub const TEST_ISSUER: &str = "http://127.0.0.1:1/idp";
+
+/// The discovery document the handshake tests run against.
+pub fn test_provider_metadata() -> ProviderMetadata {
+    ProviderMetadata {
+        issuer: TEST_ISSUER.into(),
+        authorization_endpoint: format!("{TEST_ISSUER}/authorize"),
+        token_endpoint: format!("{TEST_ISSUER}/token"),
+        jwks_uri: format!("{TEST_ISSUER}/keys"),
+        end_session_endpoint: None,
+    }
+}
+
 pub async fn app(pool: PgPool) -> Router {
+    let state = AppState::with_pool(test_config(), pool);
+    state.bootstrap().await.expect("bootstrap");
+    // Stand in for the provider's discovery document, so starting a login does
+    // not depend on one being reachable.
+    state
+        .oidc_keys
+        .preload(TEST_ISSUER, test_provider_metadata())
+        .await;
+    wsl_control::routes::router(state)
+}
+
+/// The same router with no discovery document installed, for asserting that a
+/// login fails closed when the provider cannot be reached.
+pub async fn app_without_provider(pool: PgPool) -> Router {
     let state = AppState::with_pool(test_config(), pool);
     state.bootstrap().await.expect("bootstrap");
     wsl_control::routes::router(state)

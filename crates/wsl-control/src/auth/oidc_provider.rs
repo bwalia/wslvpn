@@ -359,6 +359,25 @@ impl ProviderKeys {
         Ok(fetched)
     }
 
+    /// Install a discovery document without fetching one.
+    ///
+    /// Present for tests, which must be able to exercise the login handshake
+    /// without a provider listening — otherwise the suite passes or fails
+    /// depending on what happens to be running on the machine, which is how a
+    /// missing provider reached CI once already.
+    ///
+    /// It bypasses the issuer comparison that a fetched document is subjected to,
+    /// so whatever calls this is asserting the endpoints itself.
+    pub async fn preload(&self, issuer: &str, metadata: ProviderMetadata) {
+        self.metadata.write().await.insert(
+            issuer.to_string(),
+            Cached {
+                value: metadata,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
     /// The provider's current signing keys, refreshed when `kid` is unrecognised.
     pub async fn keys_for(
         &self,
