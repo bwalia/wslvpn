@@ -1,3 +1,4 @@
+use crate::auth::oidc_provider::ProviderKeys;
 use crate::config::Config;
 use crate::services::audit::{AuditEntry, AuditService};
 use crate::services::gitops::GitOpsService;
@@ -17,6 +18,12 @@ pub struct AppState {
     pub db: PgPool,
     pub http: reqwest::Client,
     pub metrics_handle: PrometheusHandle,
+    /// Cached provider discovery documents and signing keys.
+    ///
+    /// Shared rather than per-request so that verifying a login does not fetch
+    /// the provider's key set every time, and so key rotation is picked up
+    /// without a restart.
+    pub oidc_keys: Arc<ProviderKeys>,
 }
 
 impl AppState {
@@ -48,6 +55,7 @@ impl AppState {
             db,
             http: reqwest::Client::new(),
             metrics_handle: metrics_handle(),
+            oidc_keys: ProviderKeys::new(),
         }
     }
 

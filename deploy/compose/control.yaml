@@ -13,7 +13,14 @@ database:
 identity:
   dev_login_enabled: true
   oidc:
-    issuer: "http://dex:5556/dex"
+    # The issuer is the identity Dex signs into every token, and Dex is
+    # configured with this value. The browser resolves it; the control-plane
+    # container does not, which is what internal_url is for.
+    issuer: "http://localhost:5556/dex"
+    # Where this container reaches Dex. Only the address dialled differs — the
+    # issuer above is still checked against the discovery document and the
+    # token's iss claim.
+    internal_url: "http://dex:5556/dex"
     client_id: "wsl-client"
     client_secret: "wsl-client-secret"
     scopes:
@@ -21,6 +28,10 @@ identity:
       - profile
       - email
     redirect_uri: "http://localhost:8080/auth/oidc/callback"
+    # Lets the iOS client complete a login against the dev stack. See
+    # docs/IOS.md; without this its callback scheme is refused.
+    native_schemes:
+      - io.wsl.zerotrust
 
 wireguard:
   default_port: 51820

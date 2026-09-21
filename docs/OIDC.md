@@ -14,11 +14,29 @@ identity:
     client_id: wsl-client
     scopes: [openid, profile, email]
     redirect_uri: https://control.example.com/auth/oidc/callback
+    # Optional. Tolerance when comparing a token's exp and iat to local time.
+    clock_skew_secs: 60
+    # Optional. Where the provider is reachable from the control plane, when
+    # that is not the issuer — an in-cluster provider addressed by service DNS
+    # while its tokens name the public hostname.
+    internal_url: http://dex.identity.svc:5556/dex
 ```
 
 `redirect_uri` is what the control plane registers with the identity provider.
 It does not change for native logins: the provider always returns to the control
 plane, which then decides where to send the browser next.
+
+Endpoints are not derived from `issuer`. The control plane reads the provider's
+`/.well-known/openid-configuration` and uses the `authorization_endpoint`,
+`token_endpoint` and `jwks_uri` it publishes, so a provider that does not lay its
+URLs out the way Dex does still works. Discovery is cached for an hour.
+
+`internal_url` exists because an issuer is an identity, not necessarily a
+reachable address. When it is set, the token and JWKS endpoints are moved onto
+it for the control plane's own requests; the authorization endpoint is left
+alone, because that one is for the browser. The issuer itself is still compared
+strictly against both the discovery document and every token's `iss` claim — only
+the address dialled changes.
 
 ## Endpoints
 
@@ -113,11 +131,54 @@ validator that refuses to start a non-loopback deployment with the flag set.
 `wsl login --dev --email you@example.com` uses it. Plain `wsl login` uses the
 native flow above and works against a real deployment.
 
-## Production note
+## What is checked before a login is believed
 
-The `id_token` is currently decoded without JWKS signature verification. It is
-received directly from the provider's token endpoint over TLS in the same
-request, which OpenID Connect Core section 3.1.3.7 accepts as sufficient for a
-confidential client — but it means the control plane cannot validate a token it
-did not fetch itself, and there is no defence in depth if the token endpoint URL
-is ever wrong. Verifying against the issuer JWKS is still the right end state.
+The `id_token` is verified against the provider's published signing keys. Every
+one of these is a refusal, not a warning:
+
+| Check | Why |
+|---|---|
+| Signature, against the `jwks_uri` key named by `kid` | Nothing else establishes that the provider wrote the token |
+| Algorithm, against an asymmetric allowlist | A token names its own algorithm in a field the signature does not cover, so `alg: none` and HMAC-the-public-key confusions are refused before a key is chosen |
+| `iss` equals the configured issuer | A token from another provider is not a login here |
+| `aud` equals `client_id` | A token the provider minted for a *different* application is otherwise accepted — the confused-deputy case |
+| `exp`, within `clock_skew_secs` | An expired token is not a login |
+| `nonce` matches the one generated for this handshake | Binds the token to this attempt, so a captured one is not replayable |
+| `email_verified` is true | At a provider with open self-registration, an unverified address is a claim, not a fact |
+| `sub` is present and non-empty | It is half the identity key |
+
+Key rotation is picked up without a restart: an unrecognised `kid` refreshes the
+key set, rate limited to once a minute so that tokens bearing random `kid`s
+cannot be turned into a stream of requests to the provider.
+
+A rejected token is answered with `401` and no detail. Which check failed is
+logged, not returned — the difference between "wrong audience" and "bad
+signature" is an oracle worth denying.
+
+## Identity is keyed on the provider's subject, not on email
+
+A login resolves through `oidc_identities`, which binds `(issuer, sub)` to a
+user. `sub` is the provider's stable identifier; `email` is stored beside it as a
+last-seen attribute for display and audit, and is never an authorization key.
+
+This matters because `bootstrap.admin_emails` grants the admin role by address.
+Keying identity on the `email` claim meant any token carrying an administrator's
+address became an administrator.
+
+The binding is created on first login. Email is consulted only to attach that
+first login to a user the directory already provisioned — otherwise someone
+created through SCIM could never sign in — and three rules keep that step from
+becoming a takeover path:
+
+- A user who already has a binding for an issuer is never linked to a second
+  subject from it. That is the shape of an attacker registering another account
+  bearing a victim's address, so it is refused rather than merged.
+- Signing in never reactivates a deactivated user. Login is not a provisioning
+  decision, and treating it as one silently undoes a deprovisioning.
+- A changed address moves with the existing binding instead of matching or
+  creating another user.
+
+`crates/wsl-control/tests/oidc_identity_linking.rs` asserts each of these
+against a real database; the validation rules themselves are covered in
+`auth::oidc_provider`, and `tests/oidc_live_provider.rs` checks them against a
+running provider.

@@ -1,7 +1,13 @@
 # 0001 — One deployment serves one organisation
 
-**Status:** accepted
+**Status:** superseded by [0002 — Multi-tenancy, configuration first](0002-multi-tenancy-config-first.md)
 **Date:** 2026-09-01
+
+> Superseded on 2026-09-21. The requirement this ADR called hypothetical became
+> real, and OpsAPI turned out to model tenancy already, as namespaces. The
+> reasoning below still holds on its own terms and ADR-0002 follows the
+> sequencing it prescribes — configuration before schema — for exactly the
+> reason given here.
 
 ## Context
 

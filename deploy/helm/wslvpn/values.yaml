@@ -128,6 +128,16 @@ config:
     issuer: https://idp.example.com
     clientId: wslvpn
     scopes: [openid, profile, email]
+    # Tolerance when comparing an id_token's exp and iat to local time.
+    clockSkewSecs: 60
+    # Set when the control plane reaches the provider at an address other than
+    # the issuer — an in-cluster provider on service DNS whose tokens name the
+    # public hostname. Only the address dialled changes; the issuer is still
+    # checked against discovery and every token's iss claim.
+    internalUrl: ""
+    # Private-use URI schemes a native app may be returned to. Empty means no
+    # mobile client can complete a login.
+    nativeSchemes: []
   wireguard:
     defaultPort: 51820
   gitops:

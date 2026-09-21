@@ -94,6 +94,34 @@ pub struct OidcConfig {
     /// deployment that does not have one.
     #[serde(default)]
     pub native_schemes: Vec<String>,
+    /// Tolerance when comparing an id_token's `exp` and `iat` against local
+    /// time.
+    ///
+    /// A provider and a control plane that disagree by a few seconds would
+    /// otherwise reject valid logins, which is the kind of failure that gets
+    /// "fixed" by switching expiry checking off. A minute is enough for hosts
+    /// that keep time and small enough that an expired token is not usable for
+    /// meaningfully longer.
+    #[serde(default = "default_clock_skew_secs")]
+    pub clock_skew_secs: u64,
+    /// Where the provider is reachable from the control plane, when that is not
+    /// the issuer.
+    ///
+    /// The issuer is an identity: it appears in every token and must match what
+    /// the provider signs. It is not always an address this process can open a
+    /// connection to. A control plane running in a cluster alongside its provider
+    /// reaches it by service DNS while the tokens name the public hostname, and
+    /// the compose stack has the same split — the browser is sent to
+    /// `localhost:5556` and the container resolves `dex:5556`.
+    ///
+    /// Setting this changes only which address is dialled. The issuer is still
+    /// compared strictly against the discovery document and the token's `iss`.
+    #[serde(default)]
+    pub internal_url: Option<String>,
+}
+
+fn default_clock_skew_secs() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]

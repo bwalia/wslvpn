@@ -1,3 +1,6 @@
+use crate::auth::oidc_provider::{
+    peek_key_id, verify_id_token, OidcError, ProviderMetadata, VerifiedIdentity,
+};
 use crate::error::{AppError, AppResult};
 use crate::state::{hash_token, AppState};
 use axum::{
@@ -12,6 +15,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+
+/// Turn a verification failure into a response.
+///
+/// A rejected token is an authentication failure, not a malformed request, and
+/// the reason is logged rather than returned: which of signature, audience,
+/// issuer, expiry or nonce failed is a probing oracle if handed back. Problems
+/// reaching the provider are this deployment's fault, not the caller's, and are
+/// reported as such.
+fn reject(err: OidcError) -> AppError {
+    match err {
+        OidcError::Discovery(_) | OidcError::IssuerMismatch { .. } => {
+            tracing::error!(error = %err, "identity provider is unusable");
+            AppError::Internal(anyhow::anyhow!("identity provider is unavailable"))
+        }
+        other => {
+            tracing::warn!(error = %other, "denied: id_token failed validation");
+            AppError::Unauthorized
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
@@ -127,11 +150,20 @@ pub async fn authorize(
     rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let oauth_state = URL_SAFE_NO_PAD.encode(state_bytes);
 
+    // Binds the id_token the provider will mint to this handshake. `state`
+    // protects the redirect; the nonce protects the token, and they are separate
+    // values so that neither one leaking through a referrer or a log weakens the
+    // other.
+    let mut nonce_bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+
     sqlx::query(
         r#"
         INSERT INTO oidc_auth_states
-            (state, code_verifier, redirect_uri, client_redirect_uri, client_challenge, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (state, code_verifier, redirect_uri, client_redirect_uri, client_challenge, nonce,
+             expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&oauth_state)
@@ -139,18 +171,18 @@ pub async fn authorize(
     .bind(&redirect_uri)
     .bind(&client_redirect)
     .bind(&q.client_challenge)
+    .bind(&nonce)
     .bind(Utc::now() + Duration::minutes(10))
     .execute(&state.db)
     .await?;
 
     let oidc = &state.config.identity.oidc;
-    let mut url = url::Url::parse(&format!("{}/auth", oidc.issuer.trim_end_matches('/')))
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-    // Dex uses /auth on issuer; discovery would be better — keep simple for MVP
-    if oidc.issuer.contains("/dex") {
-        url = url::Url::parse(&format!("{}/auth", oidc.issuer.trim_end_matches('/')))
-            .map_err(|e| AppError::bad_request(e.to_string()))?;
-    }
+    // Ask the provider where its authorize endpoint is rather than assuming it
+    // sits at `{issuer}/auth`. That assumption held for Dex and for nothing
+    // else.
+    let metadata = discover(&state).await?;
+    let mut url = url::Url::parse(&metadata.authorization_endpoint)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("provider authorize endpoint: {e}")))?;
 
     {
         let mut qp = url.query_pairs_mut();
@@ -159,6 +191,7 @@ pub async fn authorize(
         qp.append_pair("scope", &oidc.scopes.join(" "));
         qp.append_pair("redirect_uri", &oidc.redirect_uri);
         qp.append_pair("state", &oauth_state);
+        qp.append_pair("nonce", &nonce);
         qp.append_pair("code_challenge", &challenge);
         qp.append_pair("code_challenge_method", "S256");
     }
@@ -170,22 +203,23 @@ pub async fn callback(
     State(state): State<AppState>,
     Query(q): Query<CallbackQuery>,
 ) -> AppResult<axum::response::Response> {
-    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         r#"
         DELETE FROM oidc_auth_states
         WHERE state = $1 AND expires_at > NOW()
-        RETURNING code_verifier, client_redirect_uri, client_challenge
+        RETURNING code_verifier, client_redirect_uri, client_challenge, nonce
         "#,
     )
     .bind(&q.state)
     .fetch_optional(&state.db)
     .await?;
-    let Some((code_verifier, client_redirect_uri, client_challenge)) = row else {
+    let Some((code_verifier, client_redirect_uri, client_challenge, nonce)) = row else {
         return Err(AppError::bad_request("invalid or expired oauth state"));
     };
 
     let oidc = &state.config.identity.oidc;
-    let token_url = format!("{}/token", oidc.issuer.trim_end_matches('/'));
+    let metadata = discover(&state).await?;
+    let token_url = metadata.token_endpoint.clone();
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", q.code.clone()),
@@ -215,8 +249,20 @@ pub async fn callback(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing id_token"))?;
 
-    let email = extract_email_unverified(id_token)?;
-    let user_id = upsert_user(&state, &email).await?;
+    // A handshake row with no nonce was written by a build that did not send
+    // one, which during a rolling upgrade means a login started against the old
+    // binary and finished against this one. Rather than skip the check for those,
+    // refuse them: the row expires in ten minutes and the person clicks again,
+    // whereas a nonce check that can be switched off by the *absence* of a value
+    // is one an attacker would aim to reproduce.
+    let Some(nonce) = nonce else {
+        tracing::warn!("denied: login handshake predates nonce enforcement; retry required");
+        return Err(AppError::bad_request("stale login attempt; start again"));
+    };
+
+    let identity = verify(&state, &metadata, id_token, Some(&nonce)).await?;
+    let email = identity.email.clone();
+    let user_id = resolve_user(&state, &identity).await?;
 
     // A native client gets a one-time code, not a token: the browser is not
     // the thing that asked to log in, and a token in a redirect URL would
@@ -333,39 +379,215 @@ pub async fn exchange(
     }))
 }
 
-/// MVP: decode JWT payload without full JWKS verification (Dex local).
-/// Production must verify signature against issuer JWKS.
-fn extract_email_unverified(id_token: &str) -> AppResult<String> {
-    let parts: Vec<_> = id_token.split('.').collect();
-    if parts.len() < 2 {
-        return Err(AppError::bad_request("malformed id_token"));
-    }
-    let payload = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-    let v: serde_json::Value =
-        serde_json::from_slice(&payload).map_err(|e| AppError::bad_request(e.to_string()))?;
-    v.get("email")
-        .and_then(|e| e.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            v.get("preferred_username")
-                .and_then(|e| e.as_str())
-                .map(|s| s.to_string())
-        })
-        .ok_or_else(|| AppError::bad_request("email claim missing"))
+/// Look up the provider's discovery document.
+async fn discover(state: &AppState) -> AppResult<ProviderMetadata> {
+    let oidc = &state.config.identity.oidc;
+    state
+        .oidc_keys
+        .metadata(&state.http, &oidc.issuer, oidc.internal_url.as_deref())
+        .await
+        .map_err(reject)
 }
 
-async fn upsert_user(state: &AppState, email: &str) -> AppResult<Uuid> {
-    let id: Uuid = sqlx::query_scalar(
+/// Verify an id_token against the provider's published keys.
+async fn verify(
+    state: &AppState,
+    metadata: &ProviderMetadata,
+    id_token: &str,
+    expected_nonce: Option<&str>,
+) -> AppResult<VerifiedIdentity> {
+    let oidc = &state.config.identity.oidc;
+    let jwks = state
+        .oidc_keys
+        .keys_for(
+            &state.http,
+            &oidc.issuer,
+            &metadata.jwks_uri,
+            peek_key_id(id_token).as_deref(),
+        )
+        .await
+        .map_err(reject)?;
+
+    verify_id_token(
+        id_token,
+        &jwks,
+        &oidc.issuer,
+        &oidc.client_id,
+        expected_nonce,
+        oidc.clock_skew_secs,
+    )
+    .map_err(reject)
+}
+
+/// Resolve a verified login to a user, creating or linking as policy allows.
+///
+/// The binding on `(issuer, subject)` is authoritative once it exists. Email is
+/// consulted only to attach a *first* login to a user the directory already
+/// created — otherwise a person provisioned through SCIM could never sign in —
+/// and even then only an address the provider says it verified, which
+/// [`verify_id_token`] has already required.
+///
+/// Three rules keep that first-login step from becoming an account-takeover
+/// path:
+///
+///   * A user who already has a binding for this issuer is never re-linked to a
+///     second subject. That is what an attacker registering a second account
+///     bearing a victim's address looks like, so it is refused rather than
+///     merged.
+///   * A deactivated user is never reactivated by signing in. Login is not a
+///     provisioning decision, and treating it as one silently undoes a
+///     deprovisioning.
+///   * A changed email address moves with the existing binding instead of
+///     creating or matching another user.
+pub async fn resolve_user(state: &AppState, identity: &VerifiedIdentity) -> AppResult<Uuid> {
+    let mut tx = state.db.begin().await?;
+
+    let bound: Option<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2")
+            .bind(&identity.issuer)
+            .bind(&identity.subject)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    let user_id = match bound {
+        Some((user_id,)) => {
+            // Known subject. The email may have changed at the provider; carry
+            // it across as an attribute, and leave `active` alone.
+            sqlx::query(
+                r#"
+                UPDATE oidc_identities SET email = $3, updated_at = NOW()
+                WHERE issuer = $1 AND subject = $2
+                "#,
+            )
+            .bind(&identity.issuer)
+            .bind(&identity.subject)
+            .bind(&identity.email)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query("UPDATE users SET email = $2, updated_at = NOW() WHERE id = $1")
+                .bind(user_id)
+                .bind(&identity.email)
+                .execute(&mut *tx)
+                .await?;
+            user_id
+        }
+        None => {
+            let existing: Option<(Uuid, bool)> =
+                sqlx::query_as("SELECT id, active FROM users WHERE email = $1")
+                    .bind(&identity.email)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+
+            match existing {
+                Some((user_id, _)) => {
+                    // Refuse to attach a second subject from the same issuer to
+                    // one user.
+                    let already: Option<(String,)> = sqlx::query_as(
+                        "SELECT subject FROM oidc_identities WHERE issuer = $1 AND user_id = $2",
+                    )
+                    .bind(&identity.issuer)
+                    .bind(user_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if let Some((other,)) = already {
+                        tracing::warn!(
+                            issuer = %identity.issuer,
+                            email = %identity.email,
+                            existing_subject = %other,
+                            "denied: refusing to link a second provider subject to one user"
+                        );
+                        return Err(AppError::Unauthorized);
+                    }
+                    link(&mut tx, identity, user_id).await?;
+                    user_id
+                }
+                None => {
+                    let user_id: Uuid = sqlx::query_scalar(
+                        r#"
+                        INSERT INTO users (email, display_name, active)
+                        VALUES ($1, $2, TRUE)
+                        RETURNING id
+                        "#,
+                    )
+                    .bind(&identity.email)
+                    .bind(identity.display_name.as_deref().unwrap_or(&identity.email))
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    link(&mut tx, identity, user_id).await?;
+                    user_id
+                }
+            }
+        }
+    };
+
+    // Checked last, and on the row rather than on anything the token said, so
+    // that a login by someone who has been deprovisioned fails no matter which
+    // branch above found them.
+    let active: bool = sqlx::query_scalar("SELECT active FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !active {
+        tracing::warn!(user_id = %user_id, "denied: login by a deactivated user");
+        return Err(AppError::Unauthorized);
+    }
+
+    tx.commit().await?;
+    Ok(user_id)
+}
+
+async fn link(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    identity: &VerifiedIdentity,
+    user_id: Uuid,
+) -> AppResult<()> {
+    sqlx::query(
         r#"
-        INSERT INTO users (email, display_name, active)
-        VALUES ($1, $1, TRUE)
-        ON CONFLICT (email) DO UPDATE SET updated_at = NOW(), active = TRUE
-        RETURNING id
+        INSERT INTO oidc_identities (issuer, subject, user_id, email)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
-    .bind(email)
+    .bind(&identity.issuer)
+    .bind(&identity.subject)
+    .bind(user_id)
+    .bind(&identity.email)
+    .execute(&mut **tx)
+    .await?;
+    tracing::info!(
+        user_id = %user_id,
+        issuer = %identity.issuer,
+        "linked identity provider subject to user"
+    );
+    Ok(())
+}
+
+/// Create-or-find a user for the dev login.
+///
+/// Separate from [`resolve_user`] because there is no provider and so no stable
+/// subject to bind to — email is all this path has. It still refuses to
+/// reactivate a deactivated account, so that a local deployment behaves the same
+/// way a real one does when someone has been deprovisioned.
+async fn dev_upsert_user(state: &AppState, email: &str) -> AppResult<Uuid> {
+    let email = email.trim().to_ascii_lowercase();
+    let existing: Option<(Uuid, bool)> =
+        sqlx::query_as("SELECT id, active FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await?;
+
+    if let Some((id, active)) = existing {
+        if !active {
+            tracing::warn!(user_id = %id, "denied: dev login by a deactivated user");
+            return Err(AppError::Unauthorized);
+        }
+        return Ok(id);
+    }
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, display_name, active) VALUES ($1, $1, TRUE) RETURNING id",
+    )
+    .bind(&email)
     .fetch_one(&state.db)
     .await?;
     Ok(id)
@@ -390,7 +612,7 @@ pub async fn dev_login(
         tracing::warn!("denied: dev login is disabled");
         return Err(AppError::Forbidden);
     }
-    let user_id = upsert_user(&state, &body.email).await?;
+    let user_id = dev_upsert_user(&state, &body.email).await?;
     // Ensure developers group membership for local demo
     let group_id: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM groups WHERE name = 'developers'")

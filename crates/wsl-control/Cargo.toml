@@ -51,5 +51,10 @@ ipnetwork = "0.20"
 [dev-dependencies]
 futures = "0.3"
 http-body-util = "0.1"
+# Generates the throwaway keypairs the id_token tests sign with, so no private
+# key is committed. Deliberately not `rsa`: the cargo-audit exception for
+# RUSTSEC-2023-0071 is justified by `rsa` never being compiled, and adding it
+# here — even as a dev-dependency — would make that justification untrue.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 serde_yaml = { workspace = true }
 tower = { workspace = true, features = ["util"] }

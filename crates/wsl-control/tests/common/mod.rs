@@ -50,6 +50,8 @@ pub fn test_config() -> Config {
                 scopes: vec!["openid".into()],
                 redirect_uri: "http://localhost:8080/auth/oidc/callback".into(),
                 native_schemes: vec!["io.wsl.zerotrust".into()],
+                clock_skew_secs: 60,
+                internal_url: None,
             },
             dev_login_enabled: false,
         },
