@@ -25,6 +25,43 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 use wsl_crypto::Pkce;
 
+/// How long the pre-flight health check may take. A control plane that cannot
+/// answer its health endpoint in this long will not complete a login either.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Confirm a WSL control plane is answering at `control_url`.
+///
+/// Its `/health` must return 200 with `{"status":"ok"}`. The body matters as
+/// much as the status: a mistyped URL can land on any site that answers 200,
+/// and sending someone to sign in there is worse than failing.
+pub async fn check_control_plane(http: &reqwest::Client, control_url: &str) -> Result<()> {
+    let base = control_url.trim_end_matches('/');
+    let url = format!("{base}/health");
+    let response = http
+        .get(&url)
+        .timeout(PREFLIGHT_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("could not reach the control plane at {base}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "no WSL control plane is answering at {base} (HTTP {} from /health). \
+             Check the address; the control plane may not be deployed yet.",
+            status.as_u16()
+        );
+    }
+    #[derive(serde::Deserialize)]
+    struct Health {
+        status: String,
+    }
+    match response.json::<Health>().await {
+        Ok(h) if h.status == "ok" => Ok(()),
+        Ok(h) => bail!("the control plane at {base} reports status `{}`", h.status),
+        Err(_) => bail!("{base} answered, but it is not a WSL control plane. Check the address."),
+    }
+}
+
 /// The path the control plane is told to send the browser back to.
 const CALLBACK_PATH: &str = "/callback";
 
@@ -50,6 +87,11 @@ pub async fn browser_login(
     control_url: &str,
     open_browser: bool,
 ) -> Result<TokenResponse> {
+    // Before anything opens: a browser sent to a control plane that is not
+    // there shows a 404 while this waits out LOGIN_TIMEOUT for a redirect that
+    // cannot come. Say so now instead.
+    check_control_plane(http, control_url).await?;
+
     let pkce = Pkce::generate();
 
     // Port 0 asks the kernel for a free one. Binding before the browser opens
@@ -257,6 +299,76 @@ fn launch_browser(url: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A server that answers every request with `status` and `body`.
+    async fn serve(status: u16, body: &'static str) -> String {
+        use axum::http::StatusCode;
+        let app = axum::Router::new()
+            .fallback(move || async move { (StatusCode::from_u16(status).unwrap(), body) });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_live_control_plane_passes_the_preflight() {
+        let url = serve(200, r#"{"status":"ok","version":"0.1.0"}"#).await;
+        check_control_plane(&reqwest::Client::new(), &url)
+            .await
+            .expect("a healthy control plane is accepted");
+    }
+
+    /// What vpn.workstation.co.uk does before the control plane is deployed:
+    /// the edge answers, the ingress has no route, and the browser would open
+    /// on a 404 while the app waited five minutes for it to come back.
+    #[tokio::test]
+    async fn a_404_fails_at_once_and_says_why() {
+        let url = serve(404, "404 page not found").await;
+        let err = check_control_plane(&reqwest::Client::new(), &url)
+            .await
+            .expect_err("nothing is there")
+            .to_string();
+        assert!(err.contains("404"), "{err}");
+        assert!(err.contains(&url), "{err}");
+        assert!(err.contains("not be deployed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_site_that_is_not_a_control_plane_is_named_as_such() {
+        let url = serve(200, "<html>welcome</html>").await;
+        let err = check_control_plane(&reqwest::Client::new(), &url)
+            .await
+            .expect_err("some other site")
+            .to_string();
+        assert!(err.contains("not a WSL control plane"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_control_plane_fails_at_once() {
+        // Port 1 on loopback: nothing listens, so the connection is refused.
+        let err = check_control_plane(&reqwest::Client::new(), "http://127.0.0.1:1")
+            .await
+            .expect_err("unreachable")
+            .to_string();
+        assert!(err.contains("could not reach"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_preflight_never_starts_the_browser_flow() {
+        let url = serve(404, "404 page not found").await;
+        let started = std::time::Instant::now();
+        let err = browser_login(&reqwest::Client::new(), &url, false)
+            .await
+            .expect_err("no control plane");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("404"), "{err}");
+    }
+
     use super::*;
 
     #[test]
