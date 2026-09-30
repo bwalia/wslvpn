@@ -16,19 +16,21 @@ image:
 
 ingress:
   enabled: true
-  className: traefik
+  # Published the way every other site on k3s1 is: the traefik-edge class, no
+  # TLS block here, and a DNS name pointing at the wslproxy edge, which
+  # terminates HTTPS with its own Let's Encrypt certificate. There is no
+  # cert-manager on this cluster and none is needed.
+  className: traefik-edge
   annotations:
-    # HTTPS only. The control plane speaks plain HTTP behind the ingress and
-    # bearer tokens ride on every request.
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    # external-dns creates the record and points it at the wslproxy edge (its
+    # default target). It only manages the domains in its --domain-filter; for
+    # a name on any other domain, create the DNS record by hand.
     external-dns.alpha.kubernetes.io/hostname: "__HOST__"
+    # The chart's default is for ingress-nginx; null removes it here.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: null
   host: "__HOST__"
   tls:
-    # How certificates are issued on k3s1 is still to be confirmed (cert-manager
-    # is not installed; see README). Until then Traefik serves its default
-    # certificate on websecure.
-    enabled: true
-    secretName: wslvpn-tls
+    enabled: false
 
 config:
   publicUrl: "https://__HOST__"
