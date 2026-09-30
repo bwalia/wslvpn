@@ -1,7 +1,7 @@
 # Deployment: control plane on k3s1, gateway on wslproxy-pop1
 
 ```text
-Mac app ──sign in──▶ https://$HOST (k3s1: Traefik → wsl-control ×2 → Postgres)
+Mac app ──sign in──▶ https://$HOST (wslproxy edge, TLS → k3s1 traefik-edge → wsl-control ×2 → Postgres)
    │                                   ▲ heartbeat, pulls peer config
    └──WireGuard──▶ wslproxy-pop1:51820 (hub wg interface ◀── wsl-gateway, adopt mode)
 ```
@@ -29,10 +29,16 @@ time; every one is listed below.
   secret to the `wslvpn` namespace and to Docker on wslproxy-pop1.
 - **Google OAuth client** (Web application) with redirect URI
   `https://$HOST/auth/oidc/callback`. See `docs/OIDC.md`, "Google".
-- **TLS for `$HOST`.** cert-manager is not installed on k3s1 (several ingresses
-  name a `main-issuer` that does not exist). Either install cert-manager with a
-  ClusterIssuer and add `cert-manager.io/cluster-issuer` to `k3s1/values.yaml`,
-  or terminate TLS at Cloudflare (proxied) with Full (strict) to Traefik.
+- **HTTPS for `$HOST`** comes from the wslproxy edge, like every other site on
+  k3s1: the ingress uses the `traefik-edge` class with no TLS block, DNS points
+  the name at the edge, and the edge terminates TLS with Let's Encrypt. There
+  is no cert-manager on k3s1 and none is needed. Two things to check:
+  - external-dns only manages the domains in its `--domain-filter`. If `$HOST`
+    is on another domain, create the record yourself, pointing where the
+    others do.
+  - The control plane must not be reachable except through the edge: bearer
+    tokens ride on every request, and the hop from the edge to Traefik is only
+    as private as the network it crosses.
 
 ## 1. Secrets into Vault
 
