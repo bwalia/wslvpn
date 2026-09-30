@@ -1,0 +1,52 @@
+# Helm values for the control plane on k3s1.
+#
+#   helm upgrade --install wslvpn oci://ghcr.io/bwalia/charts/wslvpn \
+#     --version 0.1.0 -n wslvpn -f deploy/environments/k3s1/values.yaml \
+#     --set config.publicUrl=https://$HOST --set ingress.host=$HOST
+#   (after filling the __PLACEHOLDERS__; see ../README.md)
+#
+# $HOST is the control plane's public name; Google's redirect URI is
+# https://$HOST/auth/oidc/callback. Secrets come from externalsecret.yaml.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/bwalia/wsl-control
+  tag: "0.1.0"
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    # HTTPS only. The control plane speaks plain HTTP behind the ingress and
+    # bearer tokens ride on every request.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    external-dns.alpha.kubernetes.io/hostname: "__HOST__"
+  host: "__HOST__"
+  tls:
+    # How certificates are issued on k3s1 is still to be confirmed (cert-manager
+    # is not installed; see README). Until then Traefik serves its default
+    # certificate on websecure.
+    enabled: true
+    secretName: wslvpn-tls
+
+config:
+  publicUrl: "https://__HOST__"
+  exposeDocs: false
+  oidc:
+    issuer: https://accounts.google.com
+    clientId: "__GOOGLE_CLIENT_ID__"
+    scopes: [openid, email, profile]
+    clockSkewSecs: 60
+    nativeSchemes: [io.wsl.zerotrust]
+  # Google signs in anyone with a Google account. Only people OpsAPI has
+  # provisioned are admitted. Add hostedDomains once sign-in is on a Google
+  # Workspace domain; a consumer @gmail.com account carries no `hd` claim and
+  # would be refused by it.
+  admission:
+    provisioning: directory
+    hostedDomains: []
+  adminEmails:
+    - "__ADMIN_EMAIL__"
+  gitops:
+    enabled: false

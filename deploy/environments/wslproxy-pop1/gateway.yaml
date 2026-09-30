@@ -1,0 +1,32 @@
+# The gateway on wslproxy-pop1, adopting the WireGuard hub already running
+# there. It manages ONLY peers inside managed_range; the hub's own peers, its
+# private key and its listen port are never touched.
+#
+# Starts in dry run (manage_interface: false): it logs the add/update/remove
+# plan without changing wg0. Compare that plan with `sudo wg show` before
+# flipping it to true. See docs/WIREGUARD.md, "Adopting an existing hub".
+
+control:
+  url: "https://__HOST__"
+  # The one-time enrolment secret, GATEWAY_REGISTRATION_TOKEN from Vault.
+  # Filled in on the host only, where this file is root-owned and mode 0600;
+  # the gateway reads its config literally, with no ${VAR} expansion.
+  registration_token: "__FROM_VAULT__"
+  heartbeat_secs: 15
+
+gateway:
+  name: "wslproxy-pop1"
+  # The hub's public address and WireGuard port, as roaming clients dial it.
+  endpoint: "__GATEWAY_ENDPOINT__"
+  # Fill in after the zerotrust network exists: GET /api/v1/networks.
+  # network_id: "__NETWORK_ID__"
+
+wireguard:
+  interface: "__WG_INTERFACE__"          # e.g. wg0 — confirm with `sudo wg show interfaces`
+  adopt_existing: true
+  public_key: "__HUB_PUBLIC_KEY__"       # `sudo wg show __WG_INTERFACE__ public-key`
+  # Must be disjoint from the hub's existing peers. Confirm against
+  # `sudo wg show` before enabling; see README.
+  managed_range: "__MANAGED_RANGE__"
+  manage_interface: false
+  state_dir: "/var/lib/wsl-gateway"
