@@ -17,6 +17,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Override for the CLI location, for a development build running against a
@@ -105,11 +106,33 @@ fn search_path(binary: &str) -> Option<PathBuf> {
 
 /// Run the CLI and return its stdout.
 async fn run(args: &[&str]) -> Result<String, CliError> {
+    run_with_input(args, None).await
+}
+
+/// Run the CLI with `input` on its stdin. Used to hand it a WireGuard config
+/// without writing the private key to a temporary file first.
+async fn run_with_input(args: &[&str], input: Option<&str>) -> Result<String, CliError> {
     let cli = find_cli().ok_or_else(CliError::missing)?;
-    let output = Command::new(&cli)
+    let mut child = Command::new(&cli)
         .args(args)
-        .stdin(Stdio::null())
-        .output()
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CliError::failed(format!("could not run {}: {e}", cli.display())))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin
+            .write_all(text.as_bytes())
+            .await
+            .map_err(|e| CliError::failed(format!("could not write to the CLI: {e}")))?;
+        // Dropping stdin closes it, which is the CLI's end of input.
+    }
+    let output = child
+        .wait_with_output()
         .await
         .map_err(|e| CliError::failed(format!("could not run {}: {e}", cli.display())))?;
     if !output.status.success() {
@@ -175,6 +198,61 @@ async fn disconnect() -> Result<serde_json::Value, CliError> {
     status().await
 }
 
+/// Point the agent at a control plane. The CLI refuses plain http to anything
+/// but this machine, and changing it signs out.
+#[tauri::command]
+async fn set_control_url(url: String) -> Result<serde_json::Value, CliError> {
+    run(&["config", "control-url", &url]).await?;
+    status().await
+}
+
+/// Import a WireGuard config the person picked. The text goes over stdin, so
+/// the private key in it is never written anywhere but the agent's own 0600
+/// file.
+#[tauri::command]
+async fn import_profile(text: String, name: String) -> Result<serde_json::Value, CliError> {
+    run_with_input(&["profile", "import", "--name", &name, "-"], Some(&text)).await?;
+    status().await
+}
+
+#[tauri::command]
+async fn remove_profile() -> Result<serde_json::Value, CliError> {
+    run(&["profile", "remove"]).await?;
+    status().await
+}
+
+#[tauri::command]
+async fn dns_status() -> Result<serde_json::Value, CliError> {
+    run_json(&["dns", "status", "--json"]).await
+}
+
+/// Add or change an override. `--` keeps a name from ever being read as a
+/// flag. Routing a new name needs administrator rights, which `--gui` asks
+/// for through the system dialog — and only when the set of names changed.
+#[tauri::command]
+async fn dns_set(name: String, address: String) -> Result<serde_json::Value, CliError> {
+    run(&["dns", "set", "--gui", "--", &name, &address]).await?;
+    dns_status().await
+}
+
+#[tauri::command]
+async fn dns_remove(name: String) -> Result<serde_json::Value, CliError> {
+    run(&["dns", "remove", "--gui", "--", &name]).await?;
+    dns_status().await
+}
+
+#[tauri::command]
+async fn dns_enable() -> Result<serde_json::Value, CliError> {
+    run(&["dns", "apply", "--gui"]).await?;
+    dns_status().await
+}
+
+#[tauri::command]
+async fn dns_disable() -> Result<serde_json::Value, CliError> {
+    run(&["dns", "disable", "--gui"]).await?;
+    dns_status().await
+}
+
 /// Where the CLI was found, for the UI to show when something is wrong.
 #[tauri::command]
 fn cli_location() -> Option<String> {
@@ -191,6 +269,14 @@ pub fn run_app() {
             sign_out,
             connect,
             disconnect,
+            set_control_url,
+            import_profile,
+            remove_profile,
+            dns_status,
+            dns_set,
+            dns_remove,
+            dns_enable,
+            dns_disable,
             cli_location
         ])
         .run(tauri::generate_context!())
@@ -201,8 +287,13 @@ pub fn run_app() {
 mod tests {
     use super::*;
 
+    // Every test that touches CLI_ENV holds this: the environment is
+    // process-wide and the test harness runs tests on several threads.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_stale_override_does_not_shadow_a_real_cli() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(CLI_ENV, "/nonexistent/wsl");
         assert_eq!(find_cli(), None);
         std::env::remove_var(CLI_ENV);
@@ -210,11 +301,56 @@ mod tests {
 
     #[test]
     fn the_override_is_used_when_it_points_at_a_file() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         // The test binary itself is a convenient file that certainly exists.
         let exe = std::env::current_exe().expect("current exe");
         std::env::set_var(CLI_ENV, &exe);
         assert_eq!(find_cli(), Some(exe));
         std::env::remove_var(CLI_ENV);
+    }
+
+    /// A stand-in CLI that echoes its argv and stdin, to check what the
+    /// commands actually hand it.
+    fn fake_cli() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("wsl-desktop-fake-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\necho\ncat\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// One test, because CLI_ENV is process-wide and tests run in parallel.
+    #[test]
+    fn the_cli_gets_argv_and_stdin_exactly() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let cli = fake_cli();
+        std::env::set_var(CLI_ENV, &cli);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let out = runtime
+            .block_on(run_with_input(
+                &["profile", "import", "--name", "office", "-"],
+                Some("[Interface]\n"),
+            ))
+            .expect("run");
+        assert_eq!(out, "[profile][import][--name][office][-]\n[Interface]\n");
+
+        // Without input, stdin is closed rather than inherited, and a name
+        // that looks like a flag arrives after `--` as a plain argument.
+        let out = runtime
+            .block_on(run(&["dns", "set", "--gui", "--", "-rf", "10.0.0.1"]))
+            .expect("run");
+        assert_eq!(out, "[dns][set][--gui][--][-rf][10.0.0.1]\n");
+
+        std::env::remove_var(CLI_ENV);
+        let _ = std::fs::remove_file(cli);
     }
 
     #[test]

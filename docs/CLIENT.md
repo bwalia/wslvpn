@@ -19,6 +19,18 @@ The agent searches `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin` and
 Homebrew locations are checked explicitly. `WSL_WG_QUICK` overrides the search
 with a specific path.
 
+`wg-quick` is a bash script that needs bash 4. macOS ships bash 3.2 as
+`/bin/bash`, and a privileged shell's `PATH` finds that one, so the agent does
+not leave the choice to `#!/usr/bin/env bash`: it finds a bash 4 (Homebrew's,
+usually) and runs `wg-quick` with it explicitly, with the Homebrew prefix on
+`PATH` so `wireguard-go` and `wg` are found. On macOS that means:
+
+```bash
+brew install wireguard-tools bash
+```
+
+`wsl diagnostics` prints which `wg-quick` and which bash it will use.
+
 ## Privilege
 
 Creating a network interface needs root. The agent does not run as root, and the
@@ -30,6 +42,10 @@ desktop GUI must not, so escalation happens per command and is visible:
 
 There is no persistent privileged helper. That keeps the trust boundary obvious
 at the cost of a password prompt on each connect.
+
+Everything one command needs root for runs as a single quoted `/bin/sh` script —
+for example taking a stale interface down and bringing the new one up — so
+there is one prompt, and the first failure stops the rest.
 
 ## Lifecycle
 
@@ -91,6 +107,50 @@ Three properties come out of that shape:
 `wsl status --json` and `wsl networks --json` emit the same data the human
 output is rendered from. The desktop app is built on them.
 
+## Connecting with a WireGuard config
+
+A WireGuard server that is not (yet) behind the control plane needs no sign-in.
+Import the `.conf` its administrator issued, and `connect`/`disconnect` bring
+it up and down through the same privileged path as a managed session:
+
+```bash
+wsl profile import ~/Downloads/office.conf
+wsl connect
+wsl status
+wsl disconnect
+wsl profile remove        # back to signing in
+```
+
+While a profile is imported it is what `connect` uses; `wsl status --json`
+reports `"mode": "direct"`. The file is validated on import, because `wg-quick`
+runs it as root:
+
+- `PreUp`, `PostUp`, `PreDown` and `PostDown` are refused. They are shell
+  commands, and a config someone was emailed would otherwise run anything it
+  liked with the rights the user granted to "connect".
+- Unknown keys are refused with their line number, so a typo fails here and not
+  inside an authorization dialog.
+- It needs one `[Interface]` with a `PrivateKey` and `Address`, and a `[Peer]`
+  with a `PublicKey`, `AllowedIPs` and an `Endpoint`.
+
+The config is stored mode 0600 and its private key is never copied into agent
+state.
+
+## Choosing the control plane
+
+```bash
+wsl config control-url https://vpn.example.com
+```
+
+Plain `http` is accepted only for loopback (the Compose demo): the bearer token
+rides on every request. Changing the URL signs out, since a token and device
+from one control plane mean nothing to another.
+
+## DNS overrides
+
+See [DNS.md](DNS.md): a hosts-file-style resolver, running as the user, that
+answers the names you choose and forwards the rest.
+
 ## Asking for privilege without a terminal
 
 `--gui` on `connect` and `disconnect` replaces the `sudo` prompt with the
@@ -119,6 +179,11 @@ resolved `wg-quick` path, the config path and the raw tunnel state.
 | `<data dir>/agent-state.json` | Session, device and access token — mode 0600 |
 | `<data dir>/wsl.conf` | Rendered WireGuard config, including the interface private key — mode 0600 |
 | `<data dir>/keys/wg.private` | Device private key — mode 0600 |
+| `<data dir>/profile.conf` | An imported WireGuard config — mode 0600 |
+| `<data dir>/hosts` | DNS overrides |
+| `<data dir>/dns.log` | The DNS resolver's log |
+
+`WSL_DATA_DIR` overrides the data directory.
 
 The data directory is `~/Library/Application Support/wsl-zerotrust` on macOS and
 `~/.local/share/wsl-zerotrust` on Linux.
@@ -131,8 +196,15 @@ cannot drift apart.
 
 **`wg-quick not found`** — install the WireGuard tools, or set `WSL_WG_QUICK`.
 
-**`bringing the tunnel up needs root`** — run under `sudo`, or use `--no-tunnel`
-and bring the interface up yourself.
+**`this needs administrator rights`** — run under `sudo`, or (signed in) use
+`--no-tunnel` and bring the interface up yourself.
+
+**`wg-quick needs bash 4 or newer`** / **`Version mismatch: bash 3 detected`** —
+`brew install bash`. The second message is from an older agent that let
+`/usr/bin/env` pick macOS's bash 3.2.
+
+**`Cancelled: administrator permission was not granted`** — the authorization
+dialog was dismissed. Nothing changed.
 
 **`wg-quick reported success but no interface appeared`** — `wg-quick` exited 0
 without leaving a device behind. Check `wg show` as root and the system log; on

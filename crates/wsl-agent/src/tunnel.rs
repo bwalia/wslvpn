@@ -126,9 +126,20 @@ pub enum Escalation {
     None,
 }
 
+/// Environment override declaring that this process already holds the
+/// privilege `wg-quick` needs — it runs under a supervisor that granted it (a
+/// root launchd daemon, a container with `CAP_NET_ADMIN`) or in a test with a
+/// stand-in `wg-quick`. Only `direct` is recognised. It never grants anything:
+/// without the real privilege the commands simply fail.
+pub const PRIVILEGE_ENV: &str = "WSL_PRIVILEGE";
+
+/// Where `wg-quick` records the `utun` it picked on macOS. Overridable so a
+/// stand-in `wg-quick` in a test can say which interface it "brought up".
+pub const RUN_DIR_ENV: &str = "WSL_WG_RUN_DIR";
+
 /// Decide how to run `wg-quick`.
 pub fn detect_privilege(escalation: Escalation) -> Privilege {
-    if is_root() {
+    if is_root() || std::env::var(PRIVILEGE_ENV).as_deref() == Ok("direct") {
         return Privilege::Direct;
     }
     match escalation {
@@ -173,62 +184,226 @@ fn applescript_quote(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"")
 }
 
-/// Build the command line without running it, so the argv is testable.
+/// One command to run with privilege, as an argv. Nothing here is ever
+/// interpreted by a shell except through [`Step::shell`], which quotes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
+impl Step {
+    pub fn new(
+        program: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// The step as one line of POSIX shell, every word quoted.
+    fn shell(&self) -> String {
+        std::iter::once(self.program.to_string_lossy().into_owned())
+            .chain(self.args.iter().cloned())
+            .map(|word| shell_quote(&word))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// How to invoke `wg-quick`.
+///
+/// `wg-quick` is a bash script that needs bash 4, and says so with
+/// `#!/usr/bin/env bash`. macOS ships bash 3.2 in `/bin`, and a privileged
+/// shell — `do shell script`, `sudo` with `secure_path` — runs with a `PATH` of
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, so `env` finds the old one and the script
+/// exits with "Version mismatch: bash 3 detected". That was every Connect from
+/// the desktop app. The fix is to not leave it to `env`: find a bash 4 and run
+/// the script with it explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WgQuick {
+    pub script: PathBuf,
+    /// The interpreter to run it with, when it is a bash script.
+    pub bash: Option<PathBuf>,
+}
+
+impl WgQuick {
+    /// Locate `wg-quick`, and a bash new enough to run it if it needs one.
+    pub fn locate() -> Result<Self> {
+        let script = find_wg_quick().with_context(|| {
+            format!(
+                "wg-quick not found. Install the WireGuard tools:\n  \
+                 macOS:  brew install wireguard-tools\n  \
+                 Debian: apt install wireguard-tools\n\
+                 Or set {WG_QUICK_ENV} to its path."
+            )
+        })?;
+        if !is_bash_script(&script) {
+            return Ok(Self { script, bash: None });
+        }
+        let bash = find_bash().context(
+            "wg-quick needs bash 4 or newer, and only an older bash was found.\n  \
+             macOS:  brew install bash",
+        )?;
+        Ok(Self {
+            script,
+            bash: Some(bash),
+        })
+    }
+
+    pub fn step(&self, action: Action, conf: &Path) -> Step {
+        let conf = conf.to_string_lossy().into_owned();
+        let script = self.script.to_string_lossy().into_owned();
+        match &self.bash {
+            Some(bash) => Step::new(bash, [script, action.as_str().to_string(), conf]),
+            None => Step::new(&self.script, [action.as_str().to_string(), conf]),
+        }
+    }
+
+    /// The `PATH` a privileged shell runs `wg-quick` with.
+    ///
+    /// `wg-quick` starts `wireguard-go` and `wg` by name. On macOS both are in
+    /// the Homebrew prefix, which a privileged shell's `PATH` does not include.
+    pub fn path(&self) -> String {
+        let mut dirs: Vec<String> = Vec::new();
+        for dir in [
+            self.script.parent(),
+            self.bash.as_deref().and_then(Path::parent),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            dirs.push(dir.to_string_lossy().into_owned());
+        }
+        dirs.extend(
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
+            .map(String::from),
+        );
+        let mut seen = std::collections::HashSet::new();
+        dirs.retain(|d| seen.insert(d.clone()));
+        dirs.join(":")
+    }
+}
+
+fn is_bash_script(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 64];
+    let n = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
+    let first = String::from_utf8_lossy(&head[..n]);
+    let first = first.lines().next().unwrap_or("");
+    first.starts_with("#!") && first.contains("bash")
+}
+
+/// The first bash on this machine that is version 4 or newer.
+pub fn find_bash() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = [
+        "/opt/homebrew/bin/bash",
+        "/usr/local/bin/bash",
+        "/run/current-system/sw/bin/bash",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    candidates.extend(search_path("bash"));
+    candidates.push(PathBuf::from("/bin/bash"));
+    candidates
+        .into_iter()
+        .filter(|p| p.is_file())
+        .find(|p| bash_major(p).is_some_and(|major| major >= 4))
+}
+
+fn bash_major(bash: &Path) -> Option<u32> {
+    let output = std::process::Command::new(bash)
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Build the command line that runs `steps` with privilege, without running
+/// it, so the argv is testable.
+///
+/// The steps are joined into one shell script with `&&`, so a single password
+/// prompt covers all of them and a failure stops the rest. `hint` is the
+/// command a user can run instead when there is no way to escalate here.
 pub fn plan(
-    action: Action,
-    wg_quick: &Path,
-    conf: &Path,
+    steps: &[Step],
+    path: &str,
     privilege: Privilege,
+    hint: &str,
 ) -> Result<(PathBuf, Vec<String>)> {
-    let wg_quick = wg_quick.to_string_lossy().into_owned();
-    let conf = conf.to_string_lossy().into_owned();
+    let script = std::iter::once(format!("export PATH={}", shell_quote(path)))
+        .chain(steps.iter().map(Step::shell))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let sh = || vec!["/bin/sh".to_string(), "-c".to_string(), script.clone()];
     match privilege {
-        Privilege::Direct => Ok((
-            PathBuf::from(wg_quick),
-            vec![action.as_str().to_string(), conf],
-        )),
-        Privilege::Sudo => Ok((
-            PathBuf::from("sudo"),
-            vec![wg_quick, action.as_str().to_string(), conf],
-        )),
-        // pkexec takes an argv and needs no quoting. osascript takes a script,
-        // and the string inside `do shell script` reaches /bin/sh — so the
-        // arguments are shell-quoted first and the result escaped for the
-        // AppleScript literal that carries it.
+        Privilege::Direct => Ok((PathBuf::from("/bin/sh"), sh()[1..].to_vec())),
+        Privilege::Sudo => Ok((PathBuf::from("sudo"), sh())),
+        // pkexec takes an argv. osascript takes a script, and the string inside
+        // `do shell script` reaches /bin/sh — so it is the already-quoted shell
+        // line, escaped once more for the AppleScript literal that carries it.
         Privilege::Graphical { escalator } => {
             if escalator.file_name().and_then(|n| n.to_str()) == Some("osascript") {
-                let command = format!(
-                    "{} {} {}",
-                    shell_quote(&wg_quick),
-                    shell_quote(action.as_str()),
-                    shell_quote(&conf)
-                );
-                let script = format!(
+                let apple = format!(
                     "do shell script \"{}\" with administrator privileges",
-                    applescript_quote(&command)
+                    applescript_quote(&script)
                 );
-                Ok((escalator, vec!["-e".to_string(), script]))
+                Ok((escalator, vec!["-e".to_string(), apple]))
             } else {
-                Ok((escalator, vec![wg_quick, action.as_str().to_string(), conf]))
+                Ok((escalator, sh()))
             }
         }
         Privilege::Unavailable => bail!(
-            "bringing the tunnel {} needs root, and there is no way to ask for it \
-             here.\n\
-             Re-run as `sudo wsl {}`, or pass `--no-tunnel` to only write the \
-             WireGuard config and manage the interface yourself.",
-            action.as_str(),
-            match action {
-                Action::Up => "connect",
-                Action::Down => "disconnect",
-            }
+            "this needs administrator rights, and there is no way to ask for them \
+             here.\n{hint}"
         ),
     }
 }
 
+fn unavailable_hint(action: Action) -> String {
+    let command = match action {
+        Action::Up => "connect",
+        Action::Down => "disconnect",
+    };
+    format!(
+        "Re-run as `sudo wsl {command}`, or pass `--no-tunnel` to only write the \
+         WireGuard config and manage the interface yourself."
+    )
+}
+
 /// Bring the interface up from a rendered config.
+///
+/// An interface left up by an earlier session — a crash, a sleep, a config
+/// that has since changed — is taken down first, in the same privileged run,
+/// so reconnecting never fails with "`wsl' already exists".
 pub async fn up(conf: &Path, escalation: Escalation) -> Result<TunnelState> {
-    run(Action::Up, conf, escalation).await?;
+    up_with_hint(conf, escalation, &unavailable_hint(Action::Up)).await
+}
+
+/// [`up`], naming a different way out when there is no privilege to be had.
+pub async fn up_with_hint(conf: &Path, escalation: Escalation, hint: &str) -> Result<TunnelState> {
+    ensure_conf(conf)?;
+    let wg = WgQuick::locate()?;
+    let mut steps = Vec::new();
+    if state().is_up() {
+        steps.push(wg.step(Action::Down, conf));
+    }
+    steps.push(wg.step(Action::Up, conf));
+    run_privileged(&steps, &wg.path(), escalation, hint).await?;
     let state = state();
     if !state.is_up() {
         bail!(
@@ -245,42 +420,117 @@ pub async fn down(conf: &Path, escalation: Escalation) -> Result<()> {
     if !state().is_up() {
         return Ok(());
     }
-    run(Action::Down, conf, escalation).await
+    ensure_conf(conf)?;
+    let wg = WgQuick::locate()?;
+    let steps = [wg.step(Action::Down, conf)];
+    run_privileged(
+        &steps,
+        &wg.path(),
+        escalation,
+        &unavailable_hint(Action::Down),
+    )
+    .await
 }
 
-async fn run(action: Action, conf: &Path, escalation: Escalation) -> Result<()> {
-    let wg_quick = find_wg_quick().with_context(|| {
-        format!(
-            "wg-quick not found. Install the WireGuard tools:\n  \
-             macOS:  brew install wireguard-tools\n  \
-             Debian: apt install wireguard-tools\n\
-             Or set {WG_QUICK_ENV} to its path."
-        )
-    })?;
+fn ensure_conf(conf: &Path) -> Result<()> {
     if !conf.is_file() {
         bail!(
             "no WireGuard config at {}; run `wsl connect` first",
             conf.display()
         );
     }
-    let (program, args) = plan(action, &wg_quick, conf, detect_privilege(escalation))?;
+    Ok(())
+}
 
-    // stdin/stderr are inherited so sudo can prompt for a password and so
-    // wg-quick's own diagnostics reach the user unmangled.
-    let status = Command::new(&program)
-        .args(&args)
-        .status()
+/// Run `steps` with whatever privilege `escalation` allows.
+pub async fn run_privileged(
+    steps: &[Step],
+    path: &str,
+    escalation: Escalation,
+    hint: &str,
+) -> Result<()> {
+    let privilege = detect_privilege(escalation);
+    let graphical = matches!(privilege, Privilege::Graphical { .. });
+    let (program, args) = plan(steps, path, privilege, hint)?;
+    let mut command = Command::new(&program);
+    command.args(&args);
+
+    if !graphical {
+        // stdin/stderr are inherited so sudo can prompt for a password and so
+        // wg-quick's own diagnostics reach the user unmangled.
+        let status = command
+            .status()
+            .await
+            .with_context(|| format!("failed to run {}", program.display()))?;
+        if !status.success() {
+            bail!("{} failed with {}", steps_summary(steps), status);
+        }
+        return Ok(());
+    }
+
+    // The authorization dialog has no terminal to write to, so capture what
+    // comes back and turn it into something a person can act on.
+    let output = command
+        .stdin(std::process::Stdio::null())
+        .output()
         .await
         .with_context(|| format!("failed to run {}", program.display()))?;
-    if !status.success() {
-        bail!(
-            "{} {} failed with {}",
-            program.display(),
-            action.as_str(),
-            status
-        );
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "{}",
+        explain_graphical_failure(&steps_summary(steps), &stderr)
+    )
+}
+
+fn steps_summary(steps: &[Step]) -> String {
+    steps
+        .iter()
+        .map(|s| {
+            let words: Vec<&str> = std::iter::once(s.program.to_str().unwrap_or("?"))
+                .chain(s.args.iter().map(String::as_str))
+                .collect();
+            // Name the tool, not the interpreter running it.
+            let tool = words
+                .iter()
+                .find(|w| !w.ends_with("/bash") && !w.ends_with("/sh"))
+                .copied()
+                .unwrap_or("?");
+            Path::new(tool)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| tool.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Turn osascript's error text into a sentence.
+///
+/// It reports as `0:123: execution error: <message> (<code>)`. -128 is the
+/// user pressing Cancel on the authorization dialog, which is a choice rather
+/// than a failure and should read like one.
+pub fn explain_graphical_failure(what: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.contains("(-128)") {
+        return "Cancelled: administrator permission was not granted.".into();
+    }
+    let message = stderr
+        .split_once("execution error:")
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or(stderr);
+    let message = message
+        .rsplit_once(" (")
+        .filter(|(_, code)| code.trim_end_matches(')').parse::<i64>().is_ok())
+        .map(|(m, _)| m.trim())
+        .unwrap_or(message);
+    if message.is_empty() {
+        format!("{what} failed")
+    } else {
+        format!("{what} failed: {message}")
+    }
 }
 
 /// Ask the operating system whether the interface exists.
@@ -300,7 +550,10 @@ pub fn state() -> TunnelState {
 /// `utun` the kernel gives it and records the mapping in `/var/run/wireguard`.
 /// On Linux the interface carries the configured name directly.
 fn resolved_interface() -> Option<String> {
-    let name_file = PathBuf::from(format!("/var/run/wireguard/{INTERFACE}.name"));
+    let run_dir = std::env::var_os(RUN_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/run/wireguard"));
+    let name_file = run_dir.join(format!("{INTERFACE}.name"));
     match std::fs::read_to_string(&name_file) {
         Ok(contents) => {
             let name = contents.trim();
@@ -329,36 +582,84 @@ fn interface_exists(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn wg(bash: Option<&str>) -> WgQuick {
+        WgQuick {
+            script: PathBuf::from("/opt/homebrew/bin/wg-quick"),
+            bash: bash.map(PathBuf::from),
+        }
+    }
+
+    const CONF: &str = "/tmp/wsl.conf";
+
+    /// The bug that broke every Connect from the desktop app: left to
+    /// `#!/usr/bin/env bash`, a privileged shell's PATH finds macOS's bash 3.2.
     #[test]
-    fn direct_privilege_runs_wg_quick_itself() {
-        let (program, args) = plan(
-            Action::Up,
-            Path::new("/opt/homebrew/bin/wg-quick"),
-            Path::new("/tmp/wsl.conf"),
-            Privilege::Direct,
-        )
-        .expect("direct plan");
-        assert_eq!(program, PathBuf::from("/opt/homebrew/bin/wg-quick"));
-        assert_eq!(args, vec!["up".to_string(), "/tmp/wsl.conf".to_string()]);
+    fn wg_quick_runs_under_the_bash_that_was_found_not_whatever_env_finds() {
+        let step = wg(Some("/opt/homebrew/bin/bash")).step(Action::Up, Path::new(CONF));
+        assert_eq!(step.program, PathBuf::from("/opt/homebrew/bin/bash"));
+        assert_eq!(step.args, vec!["/opt/homebrew/bin/wg-quick", "up", CONF]);
     }
 
     #[test]
-    fn sudo_privilege_puts_wg_quick_in_the_arguments() {
-        let (program, args) = plan(
-            Action::Down,
-            Path::new("/usr/bin/wg-quick"),
-            Path::new("/tmp/wsl.conf"),
-            Privilege::Sudo,
-        )
-        .expect("sudo plan");
-        assert_eq!(program, PathBuf::from("sudo"));
+    fn a_wg_quick_that_is_not_a_bash_script_runs_directly() {
+        let step = wg(None).step(Action::Down, Path::new(CONF));
+        assert_eq!(step.program, PathBuf::from("/opt/homebrew/bin/wg-quick"));
+        assert_eq!(step.args, vec!["down", CONF]);
+    }
+
+    /// wireguard-go and wg are found by name; a privileged PATH lacks Homebrew.
+    #[test]
+    fn the_privileged_path_starts_with_wg_quicks_own_directory() {
+        let path = wg(Some("/usr/local/bin/bash")).path();
+        assert!(
+            path.starts_with("/opt/homebrew/bin:/usr/local/bin:"),
+            "{path}"
+        );
+        assert!(path.ends_with("/usr/bin:/bin:/usr/sbin:/sbin"), "{path}");
+        // No directory twice.
+        let dirs: Vec<&str> = path.split(':').collect();
+        let unique: std::collections::HashSet<&&str> = dirs.iter().collect();
+        assert_eq!(dirs.len(), unique.len(), "{path}");
+    }
+
+    fn up_step() -> Step {
+        wg(Some("/opt/homebrew/bin/bash")).step(Action::Up, Path::new(CONF))
+    }
+
+    #[test]
+    fn direct_privilege_runs_the_script_in_a_plain_shell() {
+        let (program, args) = plan(&[up_step()], "/usr/bin:/bin", Privilege::Direct, "").unwrap();
+        assert_eq!(program, PathBuf::from("/bin/sh"));
         assert_eq!(
             args,
             vec![
-                "/usr/bin/wg-quick".to_string(),
-                "down".to_string(),
-                "/tmp/wsl.conf".to_string(),
+                "-c".to_string(),
+                "export PATH='/usr/bin:/bin' && '/opt/homebrew/bin/bash' \
+                 '/opt/homebrew/bin/wg-quick' 'up' '/tmp/wsl.conf'"
+                    .to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn sudo_runs_the_same_script_under_sh() {
+        let (program, args) = plan(&[up_step()], "/bin", Privilege::Sudo, "").unwrap();
+        assert_eq!(program, PathBuf::from("sudo"));
+        assert_eq!(&args[..2], &["/bin/sh".to_string(), "-c".to_string()]);
+        assert!(args[2].ends_with("'up' '/tmp/wsl.conf'"), "{}", args[2]);
+    }
+
+    /// Several steps are one script, so one password prompt covers them all
+    /// and the first failure stops the rest.
+    #[test]
+    fn several_steps_are_chained_so_a_failure_stops_the_rest() {
+        let down = wg(None).step(Action::Down, Path::new(CONF));
+        let up = wg(None).step(Action::Up, Path::new(CONF));
+        let (_, args) = plan(&[down, up], "/bin", Privilege::Direct, "").unwrap();
+        assert_eq!(
+            args[1],
+            "export PATH='/bin' && '/opt/homebrew/bin/wg-quick' 'down' '/tmp/wsl.conf' \
+             && '/opt/homebrew/bin/wg-quick' 'up' '/tmp/wsl.conf'"
         );
     }
 
@@ -366,10 +667,10 @@ mod tests {
     #[test]
     fn unavailable_privilege_explains_both_ways_out() {
         let err = plan(
-            Action::Up,
-            Path::new("/usr/bin/wg-quick"),
-            Path::new("/tmp/wsl.conf"),
+            &[up_step()],
+            "/bin",
             Privilege::Unavailable,
+            &unavailable_hint(Action::Up),
         )
         .expect_err("no privilege");
         let message = err.to_string();
@@ -380,10 +681,10 @@ mod tests {
     #[test]
     fn disconnect_error_names_the_disconnect_command() {
         let err = plan(
-            Action::Down,
-            Path::new("/usr/bin/wg-quick"),
-            Path::new("/tmp/wsl.conf"),
+            &[up_step()],
+            "/bin",
             Privilege::Unavailable,
+            &unavailable_hint(Action::Down),
         )
         .expect_err("no privilege");
         assert!(err.to_string().contains("sudo wsl disconnect"));
@@ -413,25 +714,18 @@ mod tests {
     }
 
     #[test]
-    fn pkexec_takes_an_argv_with_no_quoting() {
+    fn pkexec_runs_the_script_under_sh() {
         let (program, args) = plan(
-            Action::Up,
-            Path::new("/usr/bin/wg-quick"),
-            Path::new("/tmp/wsl.conf"),
+            &[up_step()],
+            "/bin",
             Privilege::Graphical {
                 escalator: PathBuf::from("/usr/bin/pkexec"),
             },
+            "",
         )
         .expect("pkexec plan");
         assert_eq!(program, PathBuf::from("/usr/bin/pkexec"));
-        assert_eq!(
-            args,
-            vec![
-                "/usr/bin/wg-quick".to_string(),
-                "up".to_string(),
-                "/tmp/wsl.conf".to_string(),
-            ]
-        );
+        assert_eq!(&args[..2], &["/bin/sh".to_string(), "-c".to_string()]);
     }
 
     /// The macOS config path contains a space, so the arguments have to survive
@@ -439,24 +733,75 @@ mod tests {
     #[test]
     fn osascript_quotes_a_path_with_a_space_through_both_layers() {
         let conf = "/Users/x/Library/Application Support/wsl-zerotrust/wsl.conf";
+        let step = wg(Some("/opt/homebrew/bin/bash")).step(Action::Up, Path::new(conf));
         let (program, args) = plan(
-            Action::Up,
-            Path::new("/opt/homebrew/bin/wg-quick"),
-            Path::new(conf),
+            &[step],
+            "/opt/homebrew/bin:/usr/bin",
             Privilege::Graphical {
                 escalator: PathBuf::from("/usr/bin/osascript"),
             },
+            "",
         )
         .expect("osascript plan");
         assert_eq!(program, PathBuf::from("/usr/bin/osascript"));
         assert_eq!(args[0], "-e");
         assert_eq!(
             args[1],
-            "do shell script \"'/opt/homebrew/bin/wg-quick' 'up' \
+            "do shell script \"export PATH='/opt/homebrew/bin:/usr/bin' && \
+             '/opt/homebrew/bin/bash' '/opt/homebrew/bin/wg-quick' 'up' \
              '/Users/x/Library/Application Support/wsl-zerotrust/wsl.conf'\" \
              with administrator privileges"
-                .replace("\n", "")
         );
+    }
+
+    #[test]
+    fn a_cancelled_authorization_dialog_reads_as_a_choice() {
+        let msg = explain_graphical_failure(
+            "wg-quick",
+            "0:180: execution error: User canceled. (-128)\n",
+        );
+        assert_eq!(msg, "Cancelled: administrator permission was not granted.");
+    }
+
+    #[test]
+    fn a_wg_quick_error_inside_the_dialog_is_passed_through() {
+        let msg = explain_graphical_failure(
+            "wg-quick",
+            "0:210: execution error: wg-quick: `wsl' already exists (1)\n",
+        );
+        assert_eq!(msg, "wg-quick failed: wg-quick: `wsl' already exists");
+    }
+
+    #[test]
+    fn the_summary_names_the_tool_not_the_interpreter() {
+        assert_eq!(steps_summary(&[up_step()]), "wg-quick");
+    }
+
+    #[test]
+    fn a_bash_script_is_recognised_by_its_shebang() {
+        let dir = std::env::temp_dir().join(format!("wsl-shebang-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), "#!/usr/bin/env bash\necho\n").unwrap();
+        std::fs::write(dir.join("b"), "#!/bin/sh\necho\n").unwrap();
+        assert!(is_bash_script(&dir.join("a")));
+        assert!(!is_bash_script(&dir.join("b")));
+        assert!(!is_bash_script(&dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bash_that_is_found_is_at_least_version_4() {
+        if let Some(bash) = find_bash() {
+            assert!(bash_major(&bash).unwrap() >= 4);
+        }
+    }
+
+    /// macOS ships /bin/bash 3.2; it must never be chosen.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_bash_is_too_old_to_be_chosen() {
+        assert_eq!(bash_major(Path::new("/bin/bash")), Some(3));
+        assert_ne!(find_bash(), Some(PathBuf::from("/bin/bash")));
     }
 
     #[test]

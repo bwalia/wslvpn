@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Source for every generated icon: `npx tauri icon icons/icon.png`
+       after `rsvg-convert -w 1024 -h 1024 icons/icon.svg -o icons/icon.png`. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c3a4a"/>
+      <stop offset="1" stop-color="#0b141c"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <path d="M512 232 L744 322 V520 C744 660 646 764 512 812 C378 764 280 660 280 520 V322 Z"
+        fill="none" stroke="#3db8a0" stroke-width="44" stroke-linejoin="round"/>
+  <circle cx="512" cy="500" r="54" fill="#3db8a0"/>
+  <path d="M512 554 V650" stroke="#3db8a0" stroke-width="44" stroke-linecap="round"/>
+</svg>

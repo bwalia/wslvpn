@@ -1,0 +1,19 @@
+[package]
+name = "wsl-dns"
+description = "A tiny local DNS resolver: hosts-file overrides in front of the real upstream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+cucumber = { workspace = true }
+
+# Behaviour specs in tests/features, driven by tests/bdd.rs.
+[[test]]
+name = "bdd"
+harness = false

@@ -17,3 +17,6 @@ apps/wsl-ios/build/
 apps/wsl-ios/DerivedData/
 **/xcuserdata/
 deploy/compose/data/
+
+# The bundled CLI is built by apps/wsl-desktop/Makefile, never committed.
+apps/wsl-desktop/src-tauri/binaries/

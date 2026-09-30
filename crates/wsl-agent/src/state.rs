@@ -5,7 +5,12 @@ use uuid::Uuid;
 use wsl_types::{ClientWireGuardConfig, PostureResult, PostureSignal, Session};
 
 use crate::posture;
+use crate::profile::DirectProfile;
 use crate::tunnel::TunnelState;
+
+/// Environment override for where the agent keeps its state, so a test, or a
+/// second profile, never touches the user's real one.
+pub const DATA_DIR_ENV: &str = "WSL_DATA_DIR";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentState {
@@ -20,11 +25,30 @@ pub struct AgentState {
     pub wireguard: Option<ClientWireGuardConfig>,
     #[serde(default)]
     pub network_name: Option<String>,
+    /// An imported WireGuard config. While there is one, Connect uses it and
+    /// the control plane is not involved.
+    #[serde(default)]
+    pub profile: Option<DirectProfile>,
+}
+
+/// How this agent connects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// An imported WireGuard config, no control plane.
+    Direct,
+    /// Signed in to a control plane, which issues sessions.
+    Managed,
+    /// Neither yet.
+    SignedOut,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentStatus {
     pub product: String,
+    pub mode: Mode,
+    pub control_url: String,
+    pub profile: Option<DirectProfile>,
     pub user: Option<String>,
     pub device: Option<String>,
     pub identity: String,
@@ -75,9 +99,7 @@ pub struct NetworkStatus {
 
 impl AgentState {
     pub fn data_dir() -> Result<PathBuf> {
-        let dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("wsl-zerotrust");
+        let dir = data_dir_from(std::env::var_os(DATA_DIR_ENV), dirs::data_dir())?;
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }
@@ -90,7 +112,7 @@ impl AgentState {
         let path = Self::path()?;
         if !path.exists() {
             return Ok(Self {
-                control_url: "http://localhost:8080".into(),
+                control_url: DEFAULT_CONTROL_URL.into(),
                 ..Default::default()
             });
         }
@@ -99,13 +121,35 @@ impl AgentState {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::path()?;
         let raw = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, raw)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        write_private_file(&Self::path()?, &raw)
+    }
+
+    pub fn mode(&self) -> Mode {
+        if self.profile.is_some() {
+            Mode::Direct
+        } else if self.access_token.is_some() {
+            Mode::Managed
+        } else {
+            Mode::SignedOut
+        }
+    }
+
+    /// Point the agent at a control plane. Changing it signs out: a token and
+    /// device registration from one control plane mean nothing to another.
+    pub fn set_control_url(&mut self, url: &str) -> Result<()> {
+        let url = validate_control_url(url)?;
+        if url != self.control_url {
+            self.access_token = None;
+            self.email = None;
+            self.user_id = None;
+            self.device_id = None;
+            self.device_name = None;
+            self.wireguard_public_key = None;
+            self.session = None;
+            self.wireguard = None;
+            self.network_name = None;
+            self.control_url = url;
         }
         Ok(())
     }
@@ -142,8 +186,24 @@ impl AgentState {
         posture_signals: Vec<PostureSignal>,
     ) -> AgentStatus {
         let connected = tunnel.is_up();
+        let mode = self.mode();
+        let networks = match (mode, &self.profile) {
+            (Mode::Direct, Some(profile)) => vec![NetworkStatus {
+                name: profile.name.clone(),
+                state: if connected { "Connected" } else { "Ready" }.into(),
+            }],
+            _ => self.managed_networks(connected),
+        };
+        let gateway = match (&self.profile, &self.wireguard) {
+            (Some(profile), _) => Some(profile.endpoint.clone()),
+            (None, Some(wg)) => Some(wg.peer_endpoint.clone()),
+            (None, None) => None,
+        };
         AgentStatus {
             product: "WSL Zero Trust".into(),
+            mode,
+            control_url: self.control_url.clone(),
+            profile: self.profile.clone(),
             user: self.email.clone(),
             device: self.device_name.clone(),
             identity: if self.access_token.is_some() {
@@ -152,31 +212,35 @@ impl AgentState {
                 "Signed out".into()
             },
             posture: summarise_posture(&posture_signals),
-            networks: match (self.session.is_some(), connected) {
-                (true, true) => vec![NetworkStatus {
-                    name: self.network_name(),
-                    state: "Connected".into(),
-                }],
-                // A session the gateway is holding open with no interface at
-                // this end. Worth naming: it is the state a failed bring-up
-                // leaves behind, and it is not "disconnected".
-                (true, false) => vec![NetworkStatus {
-                    name: self.network_name(),
-                    state: "Session open, tunnel down".into(),
-                }],
-                (false, true) => vec![NetworkStatus {
-                    name: "Unmanaged".into(),
-                    state: "Interface up without a session".into(),
-                }],
-                (false, false) => vec![],
-            },
+            networks,
             session_expires: self.session.as_ref().map(|s| s.expires_at.to_rfc3339()),
-            gateway: self.wireguard.as_ref().map(|w| w.peer_endpoint.clone()),
+            gateway,
             interface: match tunnel {
                 TunnelState::Up { interface } => Some(interface.clone()),
                 TunnelState::Down => None,
             },
             posture_signals,
+        }
+    }
+
+    fn managed_networks(&self, connected: bool) -> Vec<NetworkStatus> {
+        match (self.session.is_some(), connected) {
+            (true, true) => vec![NetworkStatus {
+                name: self.network_name(),
+                state: "Connected".into(),
+            }],
+            // A session the gateway is holding open with no interface at
+            // this end. Worth naming: it is the state a failed bring-up
+            // leaves behind, and it is not "disconnected".
+            (true, false) => vec![NetworkStatus {
+                name: self.network_name(),
+                state: "Session open, tunnel down".into(),
+            }],
+            (false, true) => vec![NetworkStatus {
+                name: "Unmanaged".into(),
+                state: "Interface up without a session".into(),
+            }],
+            (false, false) => vec![],
         }
     }
 
@@ -195,11 +259,18 @@ impl AgentState {
             .wireguard
             .as_ref()
             .context("no wireguard config; connect first")?;
+        // An empty `DNS =` is not "no DNS" to every wg-quick; leave the line
+        // out and the system resolver is left alone.
+        let dns = if wg.dns.is_empty() {
+            String::new()
+        } else {
+            format!("DNS = {}\n", wg.dns.join(", "))
+        };
         Ok(format!(
-            "[Interface]\nPrivateKey = {}\nAddress = {}\nDNS = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
+            "[Interface]\nPrivateKey = {}\nAddress = {}\n{}\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
             private_key.trim(),
             wg.interface_address,
-            wg.dns.join(", "),
+            dns,
             wg.peer_public_key,
             wg.peer_endpoint,
             wg.allowed_ips.join(", "),
@@ -219,15 +290,88 @@ impl AgentState {
 /// Both the agent state and the rendered WireGuard config carry secrets — a
 /// bearer token in one, the interface private key in the other — and the
 /// default umask on a shared host leaves them world-readable.
-fn write_private_file(path: &Path, contents: &str) -> Result<()> {
-    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+///
+/// The file is created 0600 before anything is written to it, so there is no
+/// moment at which the secret sits in a file anyone else can open.
+pub(crate) fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        // `mode` only applies on creation; an existing file keeps its old one.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("restricting permissions on {}", path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Resolve the data directory from the override and the platform default.
+///
+/// An empty override is unset, not "the current directory": `WSL_DATA_DIR=`
+/// in a script would otherwise scatter keys into wherever it was run from. And
+/// with no platform default there is no safe guess, so it is an error.
+fn data_dir_from(
+    explicit: Option<std::ffi::OsString>,
+    platform: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(dir) = explicit.filter(|d| !d.is_empty()) {
+        let dir = PathBuf::from(dir);
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "{DATA_DIR_ENV} must be an absolute path, not {}",
+            dir.display()
+        );
+        return Ok(dir);
+    }
+    platform
+        .map(|d| d.join("wsl-zerotrust"))
+        .with_context(|| format!("no data directory for this user; set {DATA_DIR_ENV}"))
+}
+
+pub const DEFAULT_CONTROL_URL: &str = "http://localhost:8080";
+
+/// Accept a control-plane URL only if a bearer token sent to it stays private.
+///
+/// Plain HTTP is allowed to loopback — the Compose demo — and nowhere else:
+/// the token rides in every request, and over HTTP anyone on the café Wi-Fi
+/// can read it.
+pub fn validate_control_url(raw: &str) -> Result<String> {
+    let url = url::Url::parse(raw.trim()).with_context(|| format!("`{raw}` is not a URL"))?;
+    let host = url
+        .host_str()
+        .with_context(|| format!("`{raw}` has no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    match url.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        "http" => anyhow::bail!(
+            "the control plane must use https unless it is on this machine; \
+             `{raw}` would send your sign-in token in the clear"
+        ),
+        other => anyhow::bail!("`{other}` is not a control-plane scheme; use https"),
+    }
+    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+        anyhow::bail!("`{raw}` should be just the control plane's base URL");
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 #[cfg(test)]
@@ -271,6 +415,116 @@ mod tests {
              AllowedIPs = 10.80.0.0/16, 10.90.0.0/16\n\
              PersistentKeepalive = 25\n"
         );
+    }
+
+    /// `WSL_DATA_DIR=` once put a private key in the current directory.
+    #[test]
+    fn an_empty_data_dir_override_means_the_default_not_the_cwd() {
+        let home = Some(PathBuf::from("/Users/a/Library/Application Support"));
+        assert_eq!(
+            data_dir_from(Some("".into()), home.clone()).unwrap(),
+            PathBuf::from("/Users/a/Library/Application Support/wsl-zerotrust")
+        );
+        assert_eq!(
+            data_dir_from(Some("/tmp/x".into()), home.clone()).unwrap(),
+            PathBuf::from("/tmp/x")
+        );
+        assert!(data_dir_from(Some("relative".into()), home).is_err());
+        assert!(data_dir_from(None, None).is_err());
+    }
+
+    #[test]
+    fn no_dns_servers_means_no_dns_line() {
+        let mut state = connected_state();
+        state.wireguard.as_mut().unwrap().dns.clear();
+        let conf = state.render_wg_config("k").unwrap();
+        assert!(!conf.contains("DNS"), "{conf}");
+        assert!(conf.contains("Address = 10.80.0.7/32\n\n[Peer]"), "{conf}");
+    }
+
+    #[test]
+    fn control_urls_must_be_https_unless_loopback() {
+        assert_eq!(
+            validate_control_url("https://vpn.example.com/").unwrap(),
+            "https://vpn.example.com"
+        );
+        assert_eq!(
+            validate_control_url("http://localhost:8080").unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            validate_control_url("http://127.0.0.1:8080/").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            validate_control_url("http://[::1]:8080").unwrap(),
+            "http://[::1]:8080"
+        );
+        assert!(validate_control_url("http://vpn.example.com")
+            .unwrap_err()
+            .to_string()
+            .contains("https"));
+        assert!(validate_control_url("ftp://vpn.example.com").is_err());
+        assert!(validate_control_url("vpn.example.com").is_err());
+        assert!(validate_control_url("https://u:p@vpn.example.com").is_err());
+    }
+
+    /// A token from one control plane means nothing to another.
+    #[test]
+    fn changing_the_control_plane_signs_out() {
+        let mut state = connected_state();
+        state.control_url = "https://a.example.com".into();
+        state.access_token = Some("t".into());
+        state.device_id = Some(Uuid::nil());
+        state.set_control_url("https://a.example.com/").unwrap();
+        assert!(state.access_token.is_some(), "same URL must not sign out");
+        state.set_control_url("https://b.example.com").unwrap();
+        assert!(state.access_token.is_none());
+        assert!(state.device_id.is_none());
+        assert!(state.wireguard.is_none());
+        assert_eq!(state.control_url, "https://b.example.com");
+    }
+
+    fn direct_profile() -> DirectProfile {
+        DirectProfile {
+            name: "office".into(),
+            endpoint: "vpn.example.com:51820".into(),
+            address: vec!["10.8.0.2/32".into()],
+            dns: vec![],
+            allowed_ips: vec!["10.8.0.0/24".into()],
+        }
+    }
+
+    #[test]
+    fn a_profile_makes_the_mode_direct_even_when_signed_in() {
+        let mut state = AgentState::default();
+        assert_eq!(state.mode(), Mode::SignedOut);
+        state.access_token = Some("t".into());
+        assert_eq!(state.mode(), Mode::Managed);
+        state.profile = Some(direct_profile());
+        assert_eq!(state.mode(), Mode::Direct);
+    }
+
+    #[test]
+    fn a_direct_profile_reports_its_own_network_and_gateway() {
+        let state = AgentState {
+            profile: Some(direct_profile()),
+            ..Default::default()
+        };
+        let down = state.status_with_posture(&TunnelState::Down, Vec::new());
+        assert_eq!(down.networks[0].name, "office");
+        assert_eq!(down.networks[0].state, "Ready");
+        assert_eq!(down.gateway.as_deref(), Some("vpn.example.com:51820"));
+        let up = state.status_with_posture(
+            &TunnelState::Up {
+                interface: "utun3".into(),
+            },
+            Vec::new(),
+        );
+        assert_eq!(up.networks[0].state, "Connected");
+        let json = serde_json::to_value(&up).unwrap();
+        assert_eq!(json["mode"], "direct");
+        assert_eq!(json["profile"]["endpoint"], "vpn.example.com:51820");
     }
 
     #[test]
