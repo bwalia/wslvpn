@@ -20,9 +20,9 @@
 # from the cache, else prompted for without echo — never from an argument,
 # which would land in shell history and the process list.
 #
-# Set WSLVAULT_TENANT_ID to the tenant the cluster's store reads (k3s1:
-# 019f5b59-385c-7f61-b073-8a1ae402cf4c) and a key from any other tenant is
-# refused before anything is written.
+# Set WSLVAULT_TENANT_ID to the tenant the cluster's store reads (k3s1's
+# wslvpn store: 01a0f39f-c438-7681-ac92-8ddfe4848d65) and a key from any other
+# tenant is refused before anything is written.
 #
 # Auth, in order of preference:
 #   - prompted: a wslvault API key (wslv_...), exchanged for a short-lived JWT
