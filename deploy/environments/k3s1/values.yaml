@@ -22,18 +22,19 @@ ingress:
   # cert-manager on this cluster and none is needed.
   className: traefik-edge
   annotations:
-    # external-dns creates the record and points it at the wslproxy edge (its
-    # default target). It only manages the domains in its --domain-filter; for
-    # a name on any other domain, create the DNS record by hand.
-    external-dns.alpha.kubernetes.io/hostname: "__HOST__"
+    # workstation.co.uk is outside external-dns's --domain-filter on k3s1, so
+    # this annotation is inert. The record is managed in Cloudflare directly:
+    # vpn.workstation.co.uk CNAME lon1.pop0.uk (already in place). The edge's
+    # side is registered by ../wslproxy-edge/add-vpn-host.sh.
+    external-dns.alpha.kubernetes.io/hostname: "vpn.workstation.co.uk"
     # The chart's default is for ingress-nginx; null removes it here.
     nginx.ingress.kubernetes.io/force-ssl-redirect: null
-  host: "__HOST__"
+  host: "vpn.workstation.co.uk"
   tls:
     enabled: false
 
 config:
-  publicUrl: "https://__HOST__"
+  publicUrl: "https://vpn.workstation.co.uk"
   exposeDocs: false
   oidc:
     issuer: https://accounts.google.com

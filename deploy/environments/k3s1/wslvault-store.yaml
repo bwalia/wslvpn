@@ -1,0 +1,158 @@
+# wslvpn reads its secrets from its own wslvault tenant, not the tenant the
+# cluster-wide `wslvault-backend` store serves, and only this namespace can
+# read it: a namespaced SecretStore, not a ClusterSecretStore.
+#
+# External Secrets can only authenticate to wslvault with a pre-issued JWT
+# (wslvault implements no approle/kubernetes login), and an API key yields a
+# JWT that lasts one hour. So a CronJob exchanges a machine API key for a fresh
+# token every 30 minutes and writes it where the SecretStore reads it. If the
+# refresh stops, the store fails within the hour but the Kubernetes Secrets it
+# already synced are kept, so running pods are unaffected; fix the job, and it
+# recovers on the next run.
+#
+# The API key itself is created out of band — see README, "wslvault tenant":
+#   Secret wslvault-api-key, key `api_key`: a wslv_ machine key in the tenant
+#   below, without MFA, with a policy that can only read kv/wslvpn/*.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wslvault-session
+  namespace: wslvpn
+  annotations:
+    wslvpn/written-by: wslvault-token-refresh
+type: Opaque
+# Created empty so the refresher only ever needs to patch this one object.
+stringData:
+  token: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wslvault-token-refresh
+  namespace: wslvpn
+automountServiceAccountToken: true
+---
+# Get and patch one named Secret. Nothing else — it cannot read the API key
+# through the API (that is a mounted file), nor any other Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wslvault-token-refresh
+  namespace: wslvpn
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [wslvault-session]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wslvault-token-refresh
+  namespace: wslvpn
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wslvault-token-refresh
+subjects:
+  - kind: ServiceAccount
+    name: wslvault-token-refresh
+    namespace: wslvpn
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wslvault-token-refresh
+  namespace: wslvpn
+spec:
+  # Tokens last an hour; refreshing every 30 minutes leaves one failed run of
+  # headroom before the store notices.
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: wslvault-token-refresh
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: refresh
+              image: alpine/k8s:1.30.2
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              env:
+                - { name: VAULT_ADDR, value: "https://vault.workstation.co.uk" }
+                # The tenant this namespace's secrets live in. A key from any
+                # other tenant is refused rather than silently reading nothing.
+                - { name: EXPECTED_TENANT, value: "01a0f39f-c438-7681-ac92-8ddfe4848d65" }
+                - { name: HOME, value: /work }
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  cd /work
+                  # The key goes to curl on stdin, never in argv.
+                  jq -nc --rawfile k /key/api_key '{api_key: ($k | rtrimstr("\n"))}' > req.json
+                  code=$(curl -sS -o resp.json -w '%{http_code}' --connect-timeout 10 --max-time 30 \
+                    -X POST -H 'Content-Type: application/json' --data-binary @req.json \
+                    "$VAULT_ADDR/v1/auth/api-key")
+                  rm -f req.json
+                  if [ "$code" != 200 ]; then
+                    echo "api-key exchange failed: HTTP $code $(jq -c '.errors // .' resp.json 2>/dev/null)" >&2; exit 1
+                  fi
+                  if [ "$(jq -r '.mfa_required // false' resp.json)" = true ]; then
+                    echo "this key requires MFA; the refresher needs a machine key without it" >&2; exit 1
+                  fi
+                  tenant=$(jq -r '.tenant_id // empty' resp.json)
+                  if [ "$tenant" != "$EXPECTED_TENANT" ]; then
+                    echo "key is in tenant '${tenant:-unknown}', expected $EXPECTED_TENANT; not updating" >&2; exit 1
+                  fi
+                  jq -e '.token | length > 0' resp.json >/dev/null || { echo "no token in response" >&2; exit 1; }
+                  jq -c '{data: {token: (.token | @base64)}}' resp.json > patch.json
+                  rm -f resp.json
+                  kubectl -n wslvpn patch secret wslvault-session --type merge --patch-file patch.json >/dev/null
+                  rm -f patch.json
+                  echo "refreshed wslvault session for tenant $tenant"
+              volumeMounts:
+                - { name: key, mountPath: /key, readOnly: true }
+                - { name: work, mountPath: /work }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+          volumes:
+            - name: key
+              secret:
+                secretName: wslvault-api-key
+                defaultMode: 0400
+            # In memory: the token never touches a node's disk.
+            - name: work
+              emptyDir: { medium: Memory, sizeLimit: 1Mi }
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: wslvault
+  namespace: wslvpn
+spec:
+  provider:
+    vault:
+      server: https://vault.workstation.co.uk
+      # wslvault's KV v2-compatible mount; keys are mount-relative.
+      path: kv
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: wslvault-session
+          key: token

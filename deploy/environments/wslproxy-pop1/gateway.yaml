@@ -7,7 +7,7 @@
 # flipping it to true. See docs/WIREGUARD.md, "Adopting an existing hub".
 
 control:
-  url: "https://__HOST__"
+  url: "https://vpn.workstation.co.uk"
   # The one-time enrolment secret, WSL_GATEWAY_REGISTRATION_TOKEN from wslvault.
   # Filled in on the host only, where this file is root-owned and mode 0600;
   # the gateway reads its config literally, with no ${VAR} expansion.
