@@ -20,3 +20,6 @@ deploy/compose/data/
 
 # The bundled CLI is built by apps/wsl-desktop/Makefile, never committed.
 apps/wsl-desktop/src-tauri/binaries/
+
+# Generated deployment secrets cached by deploy/scripts/vault-load-secrets.sh.
+deploy/.secrets/
