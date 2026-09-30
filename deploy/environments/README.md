@@ -18,7 +18,7 @@ time; every one is listed below.
 | `__WG_INTERFACE__` | `wslproxy-pop1/*` | `sudo wg show interfaces` on the hub |
 | `__HUB_PUBLIC_KEY__` | `wslproxy-pop1/gateway.yaml` | `sudo wg show <if> public-key` |
 | `__MANAGED_RANGE__` | `wslproxy-pop1/gateway.yaml` | A /24 disjoint from every existing peer |
-| `__FROM_VAULT__` | `wslproxy-pop1/gateway.yaml`, on the host only | `GATEWAY_REGISTRATION_TOKEN` |
+| `__FROM_VAULT__` | `wslproxy-pop1/gateway.yaml`, on the host only | `WSL_GATEWAY_REGISTRATION_TOKEN` |
 | `__NETWORK_ID__` | `wslproxy-pop1/gateway.yaml` | `GET /api/v1/networks` after step 4 |
 
 ## 0. Prerequisites
@@ -40,23 +40,29 @@ time; every one is listed below.
     tokens ride on every request, and the hop from the edge to Traefik is only
     as private as the network it crosses.
 
-## 1. Secrets into Vault
+## 1. Secrets into wslvault
 
-Run where you have Vault access. The tokens are generated on your machine;
-the Google client secret is read from a prompt so it is not in shell history.
+Secrets live in wslvault and reach the cluster through External Secrets, the
+way beaconpulse's production does: the `wslvault-backend` store, one object at
+`kv/wslvpn/prod/config`.
 
 ```bash
-read -rs -p "Google client secret: " GCS; echo
-vault kv put secret/wslvpn/control/prod/config \
-  DATABASE_PASSWORD="$(openssl rand -hex 24)" \
-  OPS_SERVICE_TOKEN="$(openssl rand -hex 32)" \
-  GATEWAY_REGISTRATION_TOKEN="$(openssl rand -hex 32)" \
-  SCIM_SERVICE_TOKEN="$(openssl rand -hex 32)" \
-  OIDC_CLIENT_SECRET="$GCS"
-unset GCS
+VAULT_ADDR=https://vault.workstation.co.uk VAULT_TOKEN=<wslvault-jwt> \
+  deploy/scripts/vault-load-secrets.sh prod
 ```
 
-Give OpsAPI the `OPS_SERVICE_TOKEN`; it provisions users with it.
+It generates the database password and the three service tokens on your
+machine, prompts for the Google client secret without echoing it, and writes
+them as one object. The generated values are cached in `deploy/.secrets/prod.env`
+(git-ignored, mode 0600), so re-running it writes the same values instead of
+rotating the database password out from under a running Postgres.
+
+Give OpsAPI the `WSL_OPS_SERVICE_TOKEN` from that file; it provisions users
+with it. The gateway needs `WSL_GATEWAY_REGISTRATION_TOKEN` (step 5).
+
+If wslvault answers 403, the token's policy does not cover `kv/data/wslvpn/*`.
+An ExternalSecret that cannot resolve fails quietly — check it explicitly in
+step 2 rather than trusting a green `helm install`.
 
 ## 2. Namespace, secrets, database
 

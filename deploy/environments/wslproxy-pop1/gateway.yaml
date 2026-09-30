@@ -8,7 +8,7 @@
 
 control:
   url: "https://__HOST__"
-  # The one-time enrolment secret, GATEWAY_REGISTRATION_TOKEN from Vault.
+  # The one-time enrolment secret, WSL_GATEWAY_REGISTRATION_TOKEN from wslvault.
   # Filled in on the host only, where this file is root-owned and mode 0600;
   # the gateway reads its config literally, with no ${VAR} expansion.
   registration_token: "__FROM_VAULT__"
