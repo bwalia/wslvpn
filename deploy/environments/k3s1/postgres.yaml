@@ -1,0 +1,120 @@
+# The control plane's database. Everything the control plane knows is here —
+# users, devices, sessions, the audit chain — so it is on Longhorn (replicated
+# across nodes) rather than local-path, and backed up nightly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wslvpn-postgres
+  namespace: wslvpn
+spec:
+  selector: { app: wslvpn-postgres }
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wslvpn-postgres
+  namespace: wslvpn
+spec:
+  serviceName: wslvpn-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: wslvpn-postgres }
+  template:
+    metadata:
+      labels: { app: wslvpn-postgres }
+    spec:
+      securityContext:
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - { name: POSTGRES_USER, value: wsl }
+            - { name: POSTGRES_DB, value: wsl }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: wslvpn-postgres, key: POSTGRES_PASSWORD } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "wsl", "-d", "wsl"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "wsl", "-d", "wsl"] }
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: longhorn
+        resources:
+          requests: { storage: 10Gi }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wslvpn-postgres-backup
+  namespace: wslvpn
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests: { storage: 10Gi }
+---
+# Same shape as the other postgres-backup jobs on k3s1: dump to a file, then
+# compress, then rename — so a failed or interrupted dump can never be mistaken
+# for a good backup.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wslvpn-postgres-backup
+  namespace: wslvpn
+spec:
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              env:
+                - { name: PGHOST, value: wslvpn-postgres.wslvpn.svc }
+                - { name: PGUSER, value: wsl }
+                - { name: PGDATABASE, value: wsl }
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: wslvpn-postgres, key: POSTGRES_PASSWORD } }
+                - { name: RETENTION_DAYS, value: "14" }
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  TS=$(date -u +%Y%m%dT%H%M%SZ)
+                  WORK="/backups/.in-progress-${TS}.sql"
+                  OUT="/backups/wslvpn-${TS}.sql.gz"
+                  pg_dump --no-owner --no-acl -f "$WORK"
+                  gzip -c "$WORK" > "${OUT}.partial"
+                  mv "${OUT}.partial" "$OUT"
+                  rm -f "$WORK"
+                  find /backups -maxdepth 1 -name 'wslvpn-*.sql.gz' -mtime "+${RETENTION_DAYS}" -delete
+              volumeMounts:
+                - { name: backups, mountPath: /backups }
+          volumes:
+            - name: backups
+              persistentVolumeClaim: { claimName: wslvpn-postgres-backup }

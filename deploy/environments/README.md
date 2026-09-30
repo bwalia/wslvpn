@@ -1,0 +1,111 @@
+# Deployment: control plane on k3s1, gateway on wslproxy-pop1
+
+```text
+Mac app ──sign in──▶ https://$HOST (k3s1: Traefik → wsl-control ×2 → Postgres)
+   │                                   ▲ heartbeat, pulls peer config
+   └──WireGuard──▶ wslproxy-pop1:51820 (hub wg interface ◀── wsl-gateway, adopt mode)
+```
+
+Nothing secret is in this directory. `__PLACEHOLDERS__` are filled in at deploy
+time; every one is listed below.
+
+| Placeholder | Where | What |
+| --- | --- | --- |
+| `__HOST__` | `k3s1/values.yaml`, `wslproxy-pop1/gateway.yaml` | Control plane's public name |
+| `__GOOGLE_CLIENT_ID__` | `k3s1/values.yaml` | Google OAuth client ID (not secret) |
+| `__ADMIN_EMAIL__` | `k3s1/values.yaml` | The first administrator's Google account |
+| `__GATEWAY_ENDPOINT__` | `wslproxy-pop1/gateway.yaml` | Hub's public `host:port` |
+| `__WG_INTERFACE__` | `wslproxy-pop1/*` | `sudo wg show interfaces` on the hub |
+| `__HUB_PUBLIC_KEY__` | `wslproxy-pop1/gateway.yaml` | `sudo wg show <if> public-key` |
+| `__MANAGED_RANGE__` | `wslproxy-pop1/gateway.yaml` | A /24 disjoint from every existing peer |
+| `__FROM_VAULT__` | `wslproxy-pop1/gateway.yaml`, on the host only | `GATEWAY_REGISTRATION_TOKEN` |
+| `__NETWORK_ID__` | `wslproxy-pop1/gateway.yaml` | `GET /api/v1/networks` after step 4 |
+
+## 0. Prerequisites
+
+- **Release `v0.1.0`** — publishes `ghcr.io/bwalia/wsl-control`,
+  `ghcr.io/bwalia/wsl-gateway` and the chart `oci://ghcr.io/bwalia/charts/wslvpn`.
+  If the GHCR packages are private, make them public or add an image pull
+  secret to the `wslvpn` namespace and to Docker on wslproxy-pop1.
+- **Google OAuth client** (Web application) with redirect URI
+  `https://$HOST/auth/oidc/callback`. See `docs/OIDC.md`, "Google".
+- **TLS for `$HOST`.** cert-manager is not installed on k3s1 (several ingresses
+  name a `main-issuer` that does not exist). Either install cert-manager with a
+  ClusterIssuer and add `cert-manager.io/cluster-issuer` to `k3s1/values.yaml`,
+  or terminate TLS at Cloudflare (proxied) with Full (strict) to Traefik.
+
+## 1. Secrets into Vault
+
+Run where you have Vault access. The tokens are generated on your machine;
+the Google client secret is read from a prompt so it is not in shell history.
+
+```bash
+read -rs -p "Google client secret: " GCS; echo
+vault kv put secret/wslvpn/control/prod/config \
+  DATABASE_PASSWORD="$(openssl rand -hex 24)" \
+  OPS_SERVICE_TOKEN="$(openssl rand -hex 32)" \
+  GATEWAY_REGISTRATION_TOKEN="$(openssl rand -hex 32)" \
+  SCIM_SERVICE_TOKEN="$(openssl rand -hex 32)" \
+  OIDC_CLIENT_SECRET="$GCS"
+unset GCS
+```
+
+Give OpsAPI the `OPS_SERVICE_TOKEN`; it provisions users with it.
+
+## 2. Namespace, secrets, database
+
+```bash
+export KUBECONFIG=~/.kube/k3s1.yaml
+kubectl apply -f k3s1/namespace.yaml
+kubectl apply -f k3s1/externalsecret.yaml
+kubectl -n wslvpn wait externalsecret --all --for=condition=Ready --timeout=2m
+kubectl apply -f k3s1/postgres.yaml
+kubectl -n wslvpn rollout status statefulset/wslvpn-postgres
+```
+
+## 3. Control plane
+
+```bash
+HOST=vpn.example.com  # yours
+sed "s/__HOST__/$HOST/g; s/__GOOGLE_CLIENT_ID__/<client-id>/; s/__ADMIN_EMAIL__/<you@example.com>/" \
+  k3s1/values.yaml > /tmp/wslvpn-values.yaml
+helm upgrade --install wslvpn oci://ghcr.io/bwalia/charts/wslvpn --version 0.1.0 \
+  -n wslvpn -f /tmp/wslvpn-values.yaml
+kubectl -n wslvpn rollout status deploy/wslvpn
+curl -fsS https://$HOST/readyz
+```
+
+Sign in from the Mac app with `https://$HOST` as the control plane — you are in
+`adminEmails`, so you are admitted without being provisioned.
+
+## 4. Network and policy
+
+Create the zero-trust network with a CIDR equal to `__MANAGED_RANGE__`, and a
+policy granting your group access, through GitOps or the admin API (see
+`gitops/examples/`). Note its id for the gateway.
+
+## 5. Gateway on wslproxy-pop1 — dry run first
+
+```bash
+sudo wg show                      # note interface, public key, every peer's allowed-ips
+sudo install -d -m 0700 /etc/wsl /var/lib/wsl-gateway
+sudo install -m 0600 gateway.yaml /etc/wsl/gateway.yaml   # placeholders filled in
+sudo install -m 0644 wsl-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now wsl-gateway
+sudo journalctl -u wsl-gateway -f
+```
+
+With `manage_interface: false` it logs its plan. Expect every existing hub
+peer under `foreign` and nothing under `remove`. Only then set
+`manage_interface: true` and restart. It never touches peers outside
+`managed_range`, the hub's private key, or its listen port.
+
+The hub must route `__MANAGED_RANGE__` to the interface (widen its address or
+`ip route add <range> dev <if>`), or peers are configured but unreachable.
+
+## Rollback
+
+- Gateway: `sudo systemctl disable --now wsl-gateway`. Peers it added stay until
+  removed; `sudo wg set <if> peer <key> remove` for each in `managed_range`.
+- Control plane: `helm -n wslvpn uninstall wslvpn`. The database and its
+  backups are separate and survive it.
