@@ -47,12 +47,14 @@ way beaconpulse's production does: the `wslvault-backend` store, one object at
 `kv/wslvpn/prod/config`.
 
 ```bash
-VAULT_ADDR=https://vault.workstation.co.uk VAULT_TOKEN=<wslvault-jwt> \
-  deploy/scripts/vault-load-secrets.sh prod
+VAULT_ADDR=https://vault.workstation.co.uk deploy/scripts/vault-load-secrets.sh prod
 ```
 
-It generates the database password and the three service tokens on your
-machine, prompts for the Google client secret without echoing it, and writes
+It prompts for your wslvault API key (`wslv_…`, exchanged for a short-lived
+token, with an authenticator code if the key requires MFA) and for the Google
+client secret, echoing neither — do not put either on the command line, where
+it lands in shell history. It generates the database password and the three
+service tokens on your machine, and writes
 them as one object. The generated values are cached in `deploy/.secrets/prod.env`
 (git-ignored, mode 0600), so re-running it writes the same values instead of
 rotating the database password out from under a running Postgres.
