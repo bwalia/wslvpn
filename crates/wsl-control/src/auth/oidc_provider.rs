@@ -106,6 +106,9 @@ pub struct VerifiedIdentity {
     /// A mutable attribute, believed only because `email_verified` was true.
     pub email: String,
     pub display_name: Option<String>,
+    /// Google Workspace's `hd` claim, lower-cased: the organisation the
+    /// account belongs to. Absent for consumer accounts and other providers.
+    pub hosted_domain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +127,8 @@ struct IdTokenClaims {
     preferred_username: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
+    #[serde(default)]
+    hd: Option<String>,
 }
 
 /// Some providers send `email_verified` as a JSON boolean, some as the strings
@@ -239,6 +244,10 @@ pub fn verify_id_token(
         subject: claims.sub,
         email: email.to_ascii_lowercase(),
         display_name: claims.name,
+        hosted_domain: claims
+            .hd
+            .map(|d| d.trim().to_ascii_lowercase())
+            .filter(|d| !d.is_empty()),
     })
 }
 
@@ -541,6 +550,21 @@ mod tests {
         // Normalised, so one provider casing cannot become a second account.
         assert_eq!(id.email, "alice@example.com");
         assert_eq!(id.display_name.as_deref(), Some("Alice"));
+    }
+
+    /// Google Workspace names the organisation in `hd`. Admission compares it,
+    /// so it has to survive verification; a consumer account has none.
+    #[test]
+    fn carries_the_hosted_domain_when_the_provider_sends_one() {
+        let mut claims = good_claims();
+        claims["hd"] = serde_json::json!("Example.com");
+        let token = sign(claims, Some(TEST_KID), Algorithm::ES256);
+        let id = verify(&token, Some("handshake-nonce")).expect("should verify");
+        assert_eq!(id.hosted_domain.as_deref(), Some("example.com"));
+
+        let token = sign(good_claims(), Some(TEST_KID), Algorithm::ES256);
+        let id = verify(&token, Some("handshake-nonce")).expect("should verify");
+        assert_eq!(id.hosted_domain, None);
     }
 
     #[test]

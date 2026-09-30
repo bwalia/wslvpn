@@ -138,6 +138,13 @@ config:
     # Private-use URI schemes a native app may be returned to. Empty means no
     # mobile client can complete a login.
     nativeSchemes: []
+  # Who may sign in. `directory` admits only people OpsAPI/SCIM provisioned;
+  # `jit` creates a user on a first verified login. With Google as the issuer,
+  # set hostedDomains to your Workspace domain or keep `directory` — the control
+  # plane refuses to start otherwise. See docs/OIDC.md.
+  admission:
+    provisioning: directory
+    hostedDomains: []
   wireguard:
     defaultPort: 51820
   gitops:

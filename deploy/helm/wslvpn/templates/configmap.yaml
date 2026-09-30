@@ -49,6 +49,14 @@ data:
           - {{ . }}
           {{- end }}
         {{- end }}
+      admission:
+        provisioning: {{ .Values.config.admission.provisioning | quote }}
+        {{- with .Values.config.admission.hostedDomains }}
+        hosted_domains:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
 
     wireguard:
       default_port: {{ .Values.config.wireguard.defaultPort }}

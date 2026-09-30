@@ -106,6 +106,50 @@ fn a_missing_secret_stops_startup_and_names_the_variable() {
     let _ = std::fs::remove_file(&path);
 }
 
+fn load_production_template_with(
+    tag: &str,
+    edit: impl Fn(String) -> String,
+) -> anyhow::Result<Config> {
+    set_production_env();
+    let template =
+        std::fs::read_to_string(repo_root().join("config/control.production.example.yaml"))
+            .unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "wsl-{tag}-{}-{:?}.yaml",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&path, edit(template)).unwrap();
+    let result = Config::load(&path);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+/// Pointed at Google, the production template starts: it admits only people
+/// the directory provisioned.
+#[test]
+fn the_production_template_is_safe_to_point_at_google() {
+    let cfg = load_production_template_with("google", |t| {
+        t.replace("${WSL_OIDC_ISSUER}", "https://accounts.google.com")
+    })
+    .expect("Google with directory admission should load");
+    assert_eq!(
+        cfg.identity.admission.provisioning,
+        wsl_control::config::Provisioning::Directory
+    );
+}
+
+/// And with the admission block edited back to "anyone", it refuses.
+#[test]
+fn the_production_template_refuses_google_open_to_everyone() {
+    let err = load_production_template_with("google-open", |t| {
+        t.replace("${WSL_OIDC_ISSUER}", "https://accounts.google.com")
+            .replace("provisioning: directory", "provisioning: jit")
+    })
+    .expect_err("Google open to every account must not start");
+    assert!(format!("{err:#}").contains("hosted_domains"), "{err:#}");
+}
+
 /// The chart's ConfigMap is rendered from the same field names the loader
 /// expects. Rendering needs Helm, so the check reads the template's literal
 /// keys instead — enough to catch a rename, without a toolchain dependency.
@@ -125,6 +169,9 @@ fn the_helm_configmap_uses_field_names_the_loader_knows() {
         "gateway_registration_token",
         "scim_service_token",
         "admin_emails",
+        "admission",
+        "provisioning",
+        "hosted_domains",
         "rate_limit",
         "window_secs",
     ] {
