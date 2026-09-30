@@ -72,24 +72,26 @@ with it. The gateway needs `WSL_GATEWAY_REGISTRATION_TOKEN` (step 5).
 
 External Secrets can only use a pre-issued wslvault token, and an API key
 yields one that lasts an hour, so the `wslvault-token-refresh` CronJob
-exchanges a machine key for a fresh token every 30 minutes. Create that key in
-tenant `01a0f39f-…` as its admin:
-
-- a policy granting only `read` on the wslvpn secrets, e.g.
-  `{"name":"wslvpn-read","rules":[{"paths":["secret/wslvpn/**"],"capabilities":["read"]}]}`
-- an API key with `"policies":["wslvpn-read"]` and **without** `mfa_required`
-  (nothing is there to type a code)
-
-Store it in the cluster from a prompt, so it is never on a command line:
+exchanges a machine key for a fresh token every 30 minutes. That key lives in
+tenant `01a0f39f-…`, carries only the read-only `wslvpn-read` policy
+(`{"paths":["secret/wslvpn/**"],"capabilities":["read"]}`, already created)
+and does not require MFA.
 
 ```bash
-read -rs -p "wslvpn machine key: " K; echo
-printf %s "$K" | kubectl -n wslvpn create secret generic wslvault-api-key --from-file=api_key=/dev/stdin
-unset K
+bash deploy/scripts/wslvault-refresher-key.sh     # bash, not zsh
 kubectl -n wslvpn patch cronjob wslvault-token-refresh -p '{"spec":{"suspend":false}}'
 kubectl -n wslvpn create job --from=cronjob/wslvault-token-refresh wslvault-token-refresh-first
 kubectl -n wslvpn logs -f job/wslvault-token-refresh-first   # "refreshed wslvault session for tenant 01a0f39f-…"
 ```
+
+The script prompts for an admin credential and stores the new key without
+printing it. **Which credential matters:** wslvault creates a key in the tenant
+of whoever signs in, whatever the request names — so a root or platform key from
+another tenant creates it over there. Use either an admin key *in* tenant
+`01a0f39f-…`, or the bootstrap admin token (`X-Admin-Token`), which may name
+any tenant. The script refuses a signed-in key from another tenant, and checks
+the new key's tenant and MFA before storing it; if either is wrong it stores
+nothing and prints the key's id to revoke.
 
 Then the store turns Ready and the ExternalSecrets sync within a minute. If the
 refresher stops, the store fails within the hour but already-synced Secrets are
