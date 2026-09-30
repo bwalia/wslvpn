@@ -20,6 +20,10 @@
 # from the cache, else prompted for without echo — never from an argument,
 # which would land in shell history and the process list.
 #
+# Set WSLVAULT_TENANT_ID to the tenant the cluster's store reads (k3s1:
+# 019f5b59-385c-7f61-b073-8a1ae402cf4c) and a key from any other tenant is
+# refused before anything is written.
+#
 # Auth, in order of preference:
 #   - prompted: a wslvault API key (wslv_...), exchanged for a short-lived JWT
 #     at /v1/auth/api-key; keys that require MFA ask for a TOTP code too.
@@ -97,7 +101,15 @@ exchange_api_key() {
     fi
     resp=$(post /v1/auth/mfa/totp "$(jq -nc --arg c "$challenge" --arg t "$code" '{challenge:$c, code:$t}')") || return 1
   fi
+
   jq -er '.token // empty' <<<"$resp" || { echo "::error::wslvault returned no token" >&2; return 1; }
+}
+
+# tenant_of JWT: the tenant a wslvault token was issued for (an unverified
+# read of its claims, only to catch writing into the wrong tenant).
+tenant_of() {
+  local p; p=$(cut -d. -f2 <<<"$1" | tr '_-' '/+'); while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done
+  base64 -d <<<"$p" 2>/dev/null | jq -r '.tenant_id // empty' 2>/dev/null
 }
 
 api_key="${WSLVAULT_API_KEY:-}"
@@ -111,6 +123,19 @@ if [ -n "$api_key" ]; then
   echo "==> signed in to wslvault with the API key"
 fi
 unset api_key
+
+# The cluster reads through its own wslvault token, which belongs to one
+# tenant; an object written into any other tenant is invisible to it, at the
+# identical path, and the ExternalSecret reports it as not existing. Say which
+# tenant this is, and refuse to write when it is not the expected one.
+if [ -n "$token" ]; then
+  tenant="$(tenant_of "$token")"
+  echo "==> wslvault tenant: ${tenant:-unknown}"
+  if [ -n "${WSLVAULT_TENANT_ID:-}" ] && [ "$tenant" != "$WSLVAULT_TENANT_ID" ]; then
+    echo "::error::this key is in tenant ${tenant:-unknown}, but the cluster reads tenant ${WSLVAULT_TENANT_ID}. Nothing was written." >&2
+    exit 1
+  fi
+fi
 
 hdr=(-H "Content-Type: application/json")
 if [ -n "$token" ]; then hdr+=(-H "X-Vault-Token: ${token}")

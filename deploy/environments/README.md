@@ -47,7 +47,9 @@ way beaconpulse's production does: the `wslvault-backend` store, one object at
 `kv/wslvpn/prod/config`.
 
 ```bash
-VAULT_ADDR=https://vault.workstation.co.uk deploy/scripts/vault-load-secrets.sh prod
+VAULT_ADDR=https://vault.workstation.co.uk \
+WSLVAULT_TENANT_ID=019f5b59-385c-7f61-b073-8a1ae402cf4c \
+  deploy/scripts/vault-load-secrets.sh prod
 ```
 
 It prompts for your wslvault API key (`wslv_…`, exchanged for a short-lived
@@ -61,6 +63,13 @@ rotating the database password out from under a running Postgres.
 
 Give OpsAPI the `WSL_OPS_SERVICE_TOKEN` from that file; it provisions users
 with it. The gateway needs `WSL_GATEWAY_REGISTRATION_TOKEN` (step 5).
+
+The key must belong to the tenant the cluster reads — the one the
+`wslvault-backend` store's token (`int/wslvault-token`) was issued for,
+`019f5b59-…cf4c` on k3s1. wslvault keeps each tenant's `kv` separate, so an
+object written with a key from another tenant succeeds and is invisible to the
+cluster at the identical path; the ExternalSecret then reports "Secret does not
+exist". `WSLVAULT_TENANT_ID` makes the loader refuse that before writing.
 
 If wslvault answers 403, the token's policy does not cover `kv/data/wslvpn/*`.
 An ExternalSecret that cannot resolve fails quietly — check it explicitly in
