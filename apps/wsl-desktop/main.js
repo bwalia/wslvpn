@@ -1,6 +1,17 @@
-// The window is a view over `wsl status --json`. It holds no state of its own:
-// every render is driven by what the agent just reported, so the dot in the
-// title bar cannot say "connected" while the interface is down.
+// The window is a view over `wsl status --json` and `wsl dns status --json`.
+// It holds no state of its own: every render is driven by what the agent just
+// reported, so the dot in the title bar cannot say "connected" while the
+// interface is down. What to show is decided in view.js; this file only
+// applies it to the DOM and wires up the buttons.
+
+import {
+  panelFor,
+  dashboard,
+  dnsView,
+  validateOverride,
+  controlUrlProblem,
+  profileNameFromFile,
+} from "./view.js";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -8,12 +19,13 @@ const el = (id) => document.getElementById(id);
 const panels = {
   loading: el("loading"),
   signedOut: el("signed-out"),
-  signedIn: el("signed-in"),
+  dashboard: el("dashboard"),
   noCli: el("no-cli"),
 };
 
 let polling = null;
 let busy = false;
+let lastStatus = null;
 
 async function invoke(command, args = {}) {
   if (!window.__TAURI_INTERNALS__) {
@@ -43,59 +55,66 @@ function setError(id, error) {
   node.textContent = error.message ?? String(error);
 }
 
-function setFact(id, value, { optional = false } = {}) {
+function applyFact(id, { value, hidden }) {
   const node = el(id);
   const label = el(`${id}-label`);
-  if (optional) {
-    const present = Boolean(value);
-    node.hidden = !present;
-    if (label) label.hidden = !present;
-    if (!present) return;
-  }
-  node.textContent = value ?? "—";
+  node.hidden = hidden;
+  if (label) label.hidden = hidden;
+  node.textContent = value;
+}
+
+function row(left, right, rightClass) {
+  const item = document.createElement("li");
+  const a = document.createElement("span");
+  a.textContent = left;
+  const b = document.createElement("span");
+  b.textContent = right;
+  if (rightClass) b.className = rightClass;
+  item.append(a, b);
+  return item;
+}
+
+function emptyRow(text) {
+  const item = document.createElement("li");
+  item.className = "empty";
+  item.textContent = text;
+  return item;
 }
 
 // A session record and a live interface are different things, and the agent
-// reports them separately. The UI keeps them separate too: "Session open,
-// tunnel down" is a real state a user needs to see, not a rounding error.
+// reports them separately. "Session open, tunnel down" is a real state a user
+// needs to see, not a rounding error.
 function renderNetworks(status) {
   const list = el("networks");
-  list.innerHTML = "";
-  if (!status.networks || status.networks.length === 0) {
-    const row = document.createElement("li");
-    row.className = "empty";
-    row.innerHTML = "<span>No networks</span>";
-    list.append(row);
+  list.replaceChildren();
+  if (!status.networks?.length) {
+    list.append(emptyRow("No networks"));
     return;
   }
   for (const network of status.networks) {
-    const row = document.createElement("li");
-    const name = document.createElement("span");
-    name.textContent = network.name;
-    const state = document.createElement("span");
-    state.textContent = network.state;
-    state.className = network.state === "Connected" ? "ok" : "warn";
-    row.append(name, state);
-    list.append(row);
+    list.append(
+      row(network.name, network.state, network.state === "Connected" ? "ok" : "warn"),
+    );
   }
 }
 
-async function renderNetworkChoices(connected) {
+async function renderNetworkChoices(show) {
   const field = el("network-field");
   const select = el("network-choice");
-  if (connected) {
+  if (!show) {
     field.hidden = true;
     return;
   }
   try {
     const networks = await invoke("networks");
-    select.innerHTML = "";
-    for (const network of networks) {
-      const option = document.createElement("option");
-      option.value = network.name;
-      option.textContent = `${network.name} — ${network.cidr}`;
-      select.append(option);
-    }
+    select.replaceChildren(
+      ...networks.map((network) => {
+        const option = document.createElement("option");
+        option.value = network.name;
+        option.textContent = `${network.name} — ${network.cidr}`;
+        return option;
+      }),
+    );
     // One network is not a choice; offering a picker for it is noise.
     field.hidden = networks.length < 2;
   } catch {
@@ -107,69 +126,95 @@ async function renderNetworkChoices(connected) {
 
 // Which check is failing matters more than the verdict: "Posture: Failing"
 // tells a user they are blocked, and nothing about what to do next.
-const POSTURE_CLASS = {
-  pass: "ok",
-  fail: "bad",
-  unknown: "warn",
-  unsupported: "muted",
-};
+const POSTURE_CLASS = { pass: "ok", fail: "bad", unknown: "warn", unsupported: "muted" };
 
 function renderPosture(signals) {
   const list = el("posture-signals");
-  list.innerHTML = "";
-  for (const signal of signals ?? []) {
-    const row = document.createElement("li");
-    const name = document.createElement("span");
-    name.textContent = signal.name.replace(/_/g, " ");
-    name.title = signal.detail ?? "";
-    const state = document.createElement("span");
-    state.textContent = signal.detail ?? signal.result;
-    state.className = POSTURE_CLASS[signal.result] ?? "muted";
-    row.append(name, state);
-    list.append(row);
-  }
+  list.replaceChildren(
+    ...(signals ?? []).map((signal) => {
+      const item = row(
+        signal.name.replace(/_/g, " "),
+        signal.detail ?? signal.result,
+        POSTURE_CLASS[signal.result] ?? "muted",
+      );
+      item.firstChild.title = signal.detail ?? "";
+      return item;
+    }),
+  );
 }
 
 function render(status) {
-  const connected = Boolean(status.interface);
-  const signedIn = status.identity !== "Signed out";
-
-  if (!signedIn) {
+  lastStatus = status;
+  if (panelFor(status) === "signedOut") {
     show("signedOut");
+    const input = el("control-url");
+    // Do not overwrite what the person is typing.
+    if (document.activeElement !== input) input.value = status.control_url ?? "";
     return;
   }
 
-  show("signedIn");
-  setFact("email", status.user);
-  setFact("device", status.device);
-  setFact("identity", status.identity);
-  setFact("posture", status.posture);
-  setFact("interface", status.interface ?? "Down");
-  setFact("gateway", status.gateway, { optional: true });
-  setFact(
-    "expires",
-    status.session_expires
-      ? new Date(status.session_expires).toLocaleString()
-      : null,
-    { optional: true },
-  );
-
-  const dot = el("dot");
-  dot.classList.toggle("down", !connected);
-  el("tunnel-state").textContent = connected ? "Connected" : "Disconnected";
-
+  show("dashboard");
+  const view = dashboard(status);
+  for (const [id, fact] of Object.entries(view.facts)) applyFact(id, fact);
+  el("dot").classList.toggle("down", !view.connected);
+  el("tunnel-state").textContent = view.stateText;
+  el("connect").hidden = !view.showConnect;
+  el("disconnect").hidden = !view.showDisconnect;
+  el("leave").textContent = view.leave.label;
+  el("leave").dataset.command = view.leave.command;
   renderPosture(status.posture_signals);
   renderNetworks(status);
-  el("connect").hidden = connected;
-  el("disconnect").hidden = !connected;
-  void renderNetworkChoices(connected);
+  void renderNetworkChoices(view.showNetworkPicker);
+}
+
+function renderDns(dns) {
+  const view = dnsView(dns);
+  const summary = el("dns-summary");
+  summary.textContent = view.summary;
+  summary.className = view.tone;
+
+  const toggle = el("dns-toggle");
+  toggle.hidden = !view.toggle;
+  if (view.toggle) {
+    toggle.textContent = view.toggle.label;
+    toggle.dataset.command = view.toggle.command;
+  }
+
+  const list = el("dns-entries");
+  list.replaceChildren();
+  if (!dns.entries.length) {
+    list.append(emptyRow("No overrides"));
+    return;
+  }
+  for (const entry of dns.entries) {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    const right = document.createElement("span");
+    right.className = "entry-actions";
+    const address = document.createElement("code");
+    address.textContent = entry.address;
+    const remove = document.createElement("button");
+    remove.className = "quiet";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${entry.name}`);
+    remove.addEventListener("click", () =>
+      act(remove, "dns-error", () => invoke("dns_remove", { name: entry.name }), renderDns),
+    );
+    right.append(address, remove);
+    item.append(name, right);
+    list.append(item);
+  }
 }
 
 async function refresh() {
   if (busy) return;
   try {
     render(await invoke("status"));
-    setError("signed-in-error", null);
+    setError("dashboard-error", null);
+    if (!panels.dashboard.hidden) {
+      renderDns(await invoke("dns_status"));
+    }
   } catch (error) {
     if (error?.kind === "cli_missing") {
       el("no-cli-message").textContent = error.message;
@@ -177,7 +222,7 @@ async function refresh() {
       stopPolling();
       return;
     }
-    setError("signed-in-error", error);
+    setError(panels.signedOut.hidden ? "dashboard-error" : "signed-out-error", error);
   }
 }
 
@@ -192,14 +237,15 @@ function stopPolling() {
 }
 
 /// Run an action that takes a while, keeping the buttons honest meanwhile.
-async function act(button, errorId, work) {
+async function act(button, errorId, work, apply = render) {
   busy = true;
   const label = button.textContent;
   button.disabled = true;
   button.textContent = `${label}…`;
   setError(errorId, null);
   try {
-    render(await work());
+    apply(await work());
+    return true;
   } catch (error) {
     if (error?.kind === "cli_missing") {
       el("no-cli-message").textContent = error.message;
@@ -207,35 +253,99 @@ async function act(button, errorId, work) {
     } else {
       setError(errorId, error);
     }
+    return false;
   } finally {
     button.disabled = false;
     button.textContent = label;
     busy = false;
+    // A status change (connect, import) may have moved us to the dashboard;
+    // read DNS for it without waiting for the next poll.
+    if (apply === render) void refresh();
   }
 }
 
-el("sign-in").addEventListener("click", async (event) => {
+el("sign-in-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = el("sign-in");
+  const url = el("control-url").value.trim();
+  const problem = controlUrlProblem(url);
+  if (problem) {
+    setError("signed-out-error", problem);
+    return;
+  }
   // Signing in opens a browser and waits for the person to finish, which can
   // take minutes. Say so rather than looking hung.
   el("sign-in-hint").hidden = false;
-  await act(event.target, "signed-out-error", () => invoke("sign_in"));
+  await act(button, "signed-out-error", async () => {
+    if (url !== lastStatus?.control_url) {
+      await invoke("set_control_url", { url });
+    }
+    return invoke("sign_in");
+  });
   el("sign-in-hint").hidden = true;
 });
 
-el("sign-out").addEventListener("click", (event) =>
-  act(event.target, "signed-in-error", () => invoke("sign_out")),
-);
+el("import-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  // WireGuard configs are a few hundred bytes. Anything large is not one.
+  if (file.size > 64 * 1024) {
+    setError("signed-out-error", "That file is too large to be a WireGuard config.");
+    return;
+  }
+  const text = await file.text();
+  await act(el("import-label"), "signed-out-error", () =>
+    invoke("import_profile", { text, name: profileNameFromFile(file.name) }),
+  );
+});
+
+// The label is the visible control; make it work from the keyboard too.
+el("import-label").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    el("import-file").click();
+  }
+});
+
+el("leave").addEventListener("click", (event) => {
+  const command = event.target.dataset.command ?? "sign_out";
+  return act(event.target, "dashboard-error", () => invoke(command));
+});
 
 el("connect").addEventListener("click", (event) => {
   const field = el("network-field");
   const network = field.hidden ? null : el("network-choice").value;
-  return act(event.target, "signed-in-error", () =>
-    invoke("connect", { network }),
-  );
+  return act(event.target, "dashboard-error", () => invoke("connect", { network }));
 });
 
 el("disconnect").addEventListener("click", (event) =>
-  act(event.target, "signed-in-error", () => invoke("disconnect")),
+  act(event.target, "dashboard-error", () => invoke("disconnect")),
+);
+
+el("dns-add").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = el("dns-name").value.trim();
+  const address = el("dns-address").value.trim();
+  const problem = validateOverride(name, address);
+  if (problem) {
+    setError("dns-error", problem);
+    return;
+  }
+  const ok = await act(
+    event.submitter ?? event.target.querySelector("button"),
+    "dns-error",
+    () => invoke("dns_set", { name, address }),
+    renderDns,
+  );
+  if (ok) {
+    el("dns-name").value = "";
+    el("dns-address").value = "";
+  }
+});
+
+el("dns-toggle").addEventListener("click", (event) =>
+  act(event.target, "dns-error", () => invoke(event.target.dataset.command), renderDns),
 );
 
 el("retry").addEventListener("click", async () => {

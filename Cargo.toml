@@ -6,6 +6,7 @@ members = [
     "crates/wsl-policy",
     "crates/wsl-control",
     "crates/wsl-gateway",
+    "crates/wsl-dns",
     "crates/wsl-agent",
     "crates/wsl-cli",
 ]
@@ -23,6 +24,8 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+# BDD: Gherkin specs under each crate's tests/features.
+cucumber = "0.21"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 hmac = "0.12"
@@ -56,3 +59,4 @@ zeroize = { version = "1", features = ["derive"] }
 wsl-types = { path = "crates/wsl-types", version = "0.1.0" }
 wsl-crypto = { path = "crates/wsl-crypto", version = "0.1.0" }
 wsl-policy = { path = "crates/wsl-policy", version = "0.1.0" }
+wsl-dns = { path = "crates/wsl-dns", version = "0.1.0" }

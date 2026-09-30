@@ -16,51 +16,65 @@
         <p>Reading agent status…</p>
       </section>
 
+      <!-- Two ways in: sign in to a control plane, or use a WireGuard config
+           an administrator handed out. The second needs no server of ours. -->
       <section id="signed-out" class="panel" hidden>
         <h1>WSL Zero Trust</h1>
         <p>Secure access to your organisation's services.</p>
-        <p class="error" id="signed-out-error" hidden></p>
-        <button id="sign-in">Sign in</button>
+
+        <form id="sign-in-form" class="stack">
+          <label class="field">
+            <span>Control plane</span>
+            <input id="control-url" type="url" required spellcheck="false"
+                   autocomplete="url" placeholder="https://vpn.example.com" />
+          </label>
+          <button id="sign-in" type="submit">Sign in</button>
+        </form>
         <p class="hint" id="sign-in-hint" hidden>
           A browser window is open. Finish signing in there.
         </p>
+
+        <div class="divider"><span>or</span></div>
+
+        <p class="hint">Have a WireGuard config file from your administrator?</p>
+        <!-- The input sits outside its label: the busy state rewrites the
+             label's text, which would otherwise delete the input with it. -->
+        <input id="import-file" type="file" accept=".conf,text/plain" hidden />
+        <label class="button secondary" id="import-label" for="import-file"
+               tabindex="0" role="button">Import WireGuard config…</label>
+
+        <p class="error" id="signed-out-error" role="alert" hidden></p>
       </section>
 
-      <section id="signed-in" class="panel" hidden>
+      <section id="dashboard" class="panel" hidden>
         <header>
           <h1>
             WSL Zero Trust
-            <span id="dot" class="dot" aria-hidden="true"></span>
-            <span id="tunnel-state" class="state">—</span>
+            <span id="dot" class="dot down" aria-hidden="true"></span>
+            <span id="tunnel-state" class="state" aria-live="polite">—</span>
           </h1>
         </header>
 
         <dl class="facts">
-          <dt>Signed in as</dt>
+          <dt id="profile-label">Profile</dt>
+          <dd id="profile">—</dd>
+          <dt id="controlUrl-label">Control plane</dt>
+          <dd id="controlUrl">—</dd>
+          <dt id="email-label">Signed in as</dt>
           <dd id="email">—</dd>
-          <dt>Device</dt>
+          <dt id="device-label">Device</dt>
           <dd id="device">—</dd>
-          <dt>Identity</dt>
+          <dt id="identity-label">Identity</dt>
           <dd id="identity">—</dd>
-          <dt>Posture</dt>
+          <dt id="posture-label">Posture</dt>
           <dd id="posture">—</dd>
-          <dt>Interface</dt>
+          <dt id="interface-label">Interface</dt>
           <dd id="interface">—</dd>
-          <dt id="gateway-label" hidden>Gateway</dt>
+          <dt id="gateway-label" hidden>Server</dt>
           <dd id="gateway" hidden>—</dd>
           <dt id="expires-label" hidden>Session expires</dt>
           <dd id="expires" hidden>—</dd>
         </dl>
-
-        <h2>Posture</h2>
-        <ul id="posture-signals"></ul>
-
-        <h2>Networks</h2>
-        <ul id="networks">
-          <li class="empty"><span>No networks</span></li>
-        </ul>
-
-        <p class="error" id="signed-in-error" hidden></p>
 
         <div class="actions">
           <label class="field" id="network-field" hidden>
@@ -69,8 +83,38 @@
           </label>
           <button id="connect">Connect</button>
           <button id="disconnect" class="secondary" hidden>Disconnect</button>
-          <button id="sign-out" class="quiet">Sign out</button>
+          <button id="leave" class="quiet">Sign out</button>
         </div>
+        <p class="error" id="dashboard-error" role="alert" hidden></p>
+
+        <h2>Networks</h2>
+        <ul id="networks">
+          <li class="empty"><span>No networks</span></li>
+        </ul>
+
+        <h2 class="with-state">
+          DNS overrides
+          <span id="dns-summary" class="muted"></span>
+        </h2>
+        <p class="hint">
+          Names here resolve to the address you give, whatever your ISP's DNS
+          says — like <code>/etc/hosts</code>, with <code>*.</code> wildcards.
+        </p>
+        <ul id="dns-entries"></ul>
+        <form id="dns-add" class="inline" autocomplete="off">
+          <input id="dns-name" spellcheck="false" aria-label="Host name"
+                 placeholder="intranet.example.com" />
+          <input id="dns-address" spellcheck="false" aria-label="Address"
+                 placeholder="10.0.0.5" />
+          <button type="submit" class="secondary">Add</button>
+        </form>
+        <div class="actions">
+          <button id="dns-toggle" class="secondary" hidden>Turn on</button>
+        </div>
+        <p class="error" id="dns-error" role="alert" hidden></p>
+
+        <h2>Posture</h2>
+        <ul id="posture-signals"></ul>
       </section>
 
       <section id="no-cli" class="panel" hidden>

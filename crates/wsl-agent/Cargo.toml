@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -26,8 +27,18 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 wsl-crypto = { workspace = true }
+wsl-dns = { workspace = true }
 url = { workspace = true }
 wsl-types = { workspace = true }
 dirs = "6"
 # geteuid, to decide whether wg-quick needs escalating through sudo.
 libc = "0.2"
+
+[dev-dependencies]
+axum = { workspace = true }
+cucumber = { workspace = true }
+
+# Behaviour specs in tests/features, driven by tests/bdd.rs.
+[[test]]
+name = "bdd"
+harness = false

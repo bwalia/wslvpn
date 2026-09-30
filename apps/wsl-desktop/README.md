@@ -5,13 +5,25 @@ no privileged operation of its own: everything it shows is read back from
 `wsl status --json`, and everything it does is a CLI invocation. There is one
 implementation of what "connected" means, and the window cannot drift from it.
 
-## Dev
+## Build, test, run
 
 ```bash
 cd apps/wsl-desktop
-npm install
-npm run tauri dev
+make test     # view logic (node --test) + the CLI bridge (cargo test, clippy)
+make dev      # a window over a debug build of the CLI
+make app      # release bundle, with the CLI inside it
+open "src-tauri/target/release/bundle/macos/WSL Zero Trust.app"
 ```
+
+The Mac needs the WireGuard tools and a bash new enough to run `wg-quick`:
+
+```bash
+brew install wireguard-tools bash
+```
+
+Everything the window decides — which panel, which buttons, what the DNS line
+says — is in `view.js`, a pure function of the CLI's JSON, and is covered by
+`view.test.js`. `main.js` only applies it to the DOM.
 
 Requires a Rust toolchain, and macOS for native builds. `src-tauri` is its own
 cargo workspace — Tauri pulls in the platform webview, which the control plane
@@ -24,6 +36,27 @@ Point the app at a development build of the CLI with `WSL_CLI`:
 cargo build -p wsl-cli
 WSL_CLI=$PWD/../../target/debug/wsl npm run tauri dev
 ```
+
+## Connecting
+
+The first screen offers two ways in:
+
+- **Sign in** — enter the control plane's URL (`https`, or `http` to this
+  machine only) and sign in through its identity provider in the browser.
+- **Import WireGuard config…** — pick the `.conf` your administrator issued.
+  The app connects straight to that WireGuard server; no control plane is
+  involved. Configs with `PostUp`/`PreUp`/`PostDown`/`PreDown` are refused,
+  because `wg-quick` would run those commands as root.
+
+Connect and Disconnect show the macOS administrator dialog: bringing an
+interface up needs root, and the app itself never has it.
+
+## DNS overrides
+
+The dashboard lists overrides, adds and removes them, and turns them on and
+off. Changing an existing name's address applies immediately; adding a new
+name asks for administrator rights once, to route it. See
+[docs/DNS.md](../../docs/DNS.md).
 
 ## Finding the CLI
 
@@ -50,7 +83,9 @@ asks macOS for the privilege through its own authorization dialog. Only
 
 | Field | Source |
 | --- | --- |
+| Profile, Control plane | `wsl status --json` (`mode`, `profile`, `control_url`) |
 | Signed in as, Device, Identity, Posture | `wsl status --json` |
+| DNS overrides | `wsl dns status --json` |
 | Interface | the `utun` the OS reports, or "Down" |
 | Networks | one row per network, with the agent's own state string |
 | Gateway, Session expires | shown only when there is a session |

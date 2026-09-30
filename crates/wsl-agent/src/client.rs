@@ -254,10 +254,47 @@ fn hostname() -> String {
     hostname_impl().unwrap_or_else(|| "unknown-device".into())
 }
 
+/// Ask the kernel. `/etc/hostname` does not exist on macOS and `HOSTNAME` is
+/// a shell variable a GUI-launched process never sees, which is how every Mac
+/// used to register as "unknown-device".
 fn hostname_impl() -> Option<String> {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname NUL-terminates
+    // within it or truncates, and we stop at the first NUL either way.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    let from_kernel = (rc == 0)
+        .then(|| {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            String::from_utf8_lossy(&buf[..end]).into_owned()
+        })
+        .map(|name| display_hostname(&name))
+        .filter(|name| !name.is_empty());
+    from_kernel.or_else(|| std::env::var("COMPUTERNAME").ok())
+}
+
+/// `alices-mbp.local` reads better as `alices-mbp` in a device list; the
+/// `.local` suffix is mDNS plumbing, not part of the name.
+fn display_hostname(name: &str) -> String {
+    name.trim().trim_end_matches(".local").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hostname_comes_from_the_kernel_not_the_environment() {
+        let name = hostname();
+        assert_ne!(name, "unknown-device");
+        assert!(!name.ends_with(".local"), "{name}");
+    }
+
+    #[test]
+    fn the_mdns_suffix_is_dropped() {
+        assert_eq!(display_hostname("alices-mbp.local"), "alices-mbp");
+        assert_eq!(
+            display_hostname("build01.example.com"),
+            "build01.example.com"
+        );
+    }
 }
