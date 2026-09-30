@@ -76,7 +76,45 @@ pub struct IdentityConfig {
     /// production control plane into an open door.
     #[serde(default)]
     pub dev_login_enabled: bool,
+    /// Who may sign in at all, beyond "the provider verified them".
+    #[serde(default)]
+    pub admission: AdmissionConfig,
 }
+
+/// Which verified logins are admitted.
+///
+/// The provider proves who someone is; it says nothing about whether they
+/// belong here. For a private provider — Dex, Keycloak, a tenant of Entra ID —
+/// everyone it can sign in is already one of yours. For Google it is anyone
+/// with a Google account, so a Google deployment has to narrow it, and
+/// [`Config::validate`] refuses to start one that does not.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct AdmissionConfig {
+    /// Whether a first login creates a user, or only finds one the directory
+    /// (OpsAPI, over `/api/v1/ops/users` or SCIM) already created.
+    #[serde(default)]
+    pub provisioning: Provisioning,
+    /// Google Workspace domains whose accounts may sign in, compared with the
+    /// id_token's `hd` claim. Not the email domain: a consumer Google account
+    /// can carry a verified address at any domain, including yours. Empty
+    /// means no domain restriction.
+    #[serde(default)]
+    pub hosted_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Provisioning {
+    /// A first login by a verified identity with no user creates one.
+    #[default]
+    Jit,
+    /// Only people the directory has provisioned may sign in. The directory
+    /// decides who is in; the provider only proves who is asking.
+    Directory,
+}
+
+/// Google's issuer, whose accounts are open to anyone.
+pub const GOOGLE_ISSUER: &str = "https://accounts.google.com";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OidcConfig {
@@ -227,6 +265,30 @@ impl Config {
         Ok(cfg)
     }
 
+    fn validate_admission(&self) -> Result<()> {
+        let admission = &self.identity.admission;
+        for domain in &admission.hosted_domains {
+            let ok = domain.contains('.')
+                && domain.split('.').all(|l| {
+                    !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                });
+            if !ok {
+                anyhow::bail!("identity.admission.hosted_domains: '{domain}' is not a domain name");
+            }
+        }
+        let open =
+            admission.provisioning == Provisioning::Jit && admission.hosted_domains.is_empty();
+        if self.identity.oidc.issuer.trim_end_matches('/') == GOOGLE_ISSUER && open {
+            anyhow::bail!(
+                "identity.oidc.issuer is Google, which signs in anyone with a Google account, \
+                 and nothing narrows that. Set identity.admission.hosted_domains to your \
+                 Google Workspace domain, or identity.admission.provisioning to `directory` \
+                 so only people OpsAPI has provisioned can sign in (or both)."
+            );
+        }
+        Ok(())
+    }
+
     /// True when the control plane is addressed as a loopback host.
     pub fn is_local(&self) -> bool {
         self.server.public_url.contains("localhost") || self.server.public_url.contains("127.0.0.1")
@@ -245,6 +307,7 @@ impl Config {
         for scheme in &self.identity.oidc.native_schemes {
             validate_native_scheme(scheme)?;
         }
+        self.validate_admission()?;
         if self.database.max_connections == 0 {
             anyhow::bail!("database.max_connections must be at least 1");
         }
@@ -391,6 +454,89 @@ pub fn validate_native_scheme(scheme: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_with(issuer: &str, admission: AdmissionConfig) -> Config {
+        let yaml = format!(
+            r#"
+server: {{ listen: "0.0.0.0:8080", public_url: "http://localhost:8080" }}
+product: {{ namespace: wsl, display_name: test }}
+database: {{ url: "postgres://x", max_connections: 5, min_connections: 1 }}
+identity:
+  oidc:
+    issuer: "{issuer}"
+    client_id: c
+    scopes: [openid]
+    redirect_uri: "http://localhost:8080/auth/oidc/callback"
+wireguard: {{ default_port: 51820 }}
+gitops: {{ enabled: false, path: "." }}
+bootstrap: {{ ops_service_token: "0123456789abcdef", gateway_registration_token: "0123456789abcdef" }}
+"#
+        );
+        let mut config: Config = serde_yaml::from_str(&yaml).expect("parse");
+        config.identity.admission = admission;
+        config
+    }
+
+    /// With Google as the provider and nothing else configured, every Google
+    /// account in the world could create a user here.
+    #[test]
+    fn google_with_open_admission_refuses_to_start() {
+        let err = config_with("https://accounts.google.com", AdmissionConfig::default())
+            .validate()
+            .expect_err("open Google admission must be refused");
+        let message = err.to_string();
+        assert!(message.contains("hosted_domains"), "{message}");
+        assert!(message.contains("directory"), "{message}");
+    }
+
+    #[test]
+    fn google_limited_to_a_workspace_domain_starts() {
+        let admission = AdmissionConfig {
+            hosted_domains: vec!["example.com".into()],
+            ..Default::default()
+        };
+        config_with("https://accounts.google.com", admission)
+            .validate()
+            .expect("a hosted-domain restriction is enough");
+    }
+
+    #[test]
+    fn google_admitting_only_directory_users_starts() {
+        let admission = AdmissionConfig {
+            provisioning: Provisioning::Directory,
+            ..Default::default()
+        };
+        config_with("https://accounts.google.com", admission)
+            .validate()
+            .expect("directory-only admission is enough");
+    }
+
+    #[test]
+    fn a_private_provider_keeps_just_in_time_provisioning_by_default() {
+        config_with("https://idp.example.com", AdmissionConfig::default())
+            .validate()
+            .expect("unchanged for existing deployments");
+    }
+
+    #[test]
+    fn admission_reads_from_yaml() {
+        let admission: AdmissionConfig =
+            serde_yaml::from_str("provisioning: directory\nhosted_domains: [Example.com]\n")
+                .expect("parse");
+        assert_eq!(admission.provisioning, Provisioning::Directory);
+        assert_eq!(admission.hosted_domains, vec!["Example.com".to_string()]);
+    }
+
+    #[test]
+    fn a_hosted_domain_that_is_not_a_domain_is_refused() {
+        let admission = AdmissionConfig {
+            hosted_domains: vec!["*.example.com".into()],
+            ..Default::default()
+        };
+        assert!(config_with("https://accounts.google.com", admission)
+            .validate()
+            .is_err());
+    }
 
     #[test]
     fn expands_a_set_variable() {

@@ -152,7 +152,7 @@ async fn wait_for_code(listener: &TcpListener) -> Result<String> {
                     .write_all(page(400, "Sign-in failed", &message).as_bytes())
                     .await;
                 let _ = socket.flush().await;
-                bail!("the identity provider reported: {message}");
+                bail!("sign-in refused: {message}");
             }
         }
     }
@@ -200,15 +200,18 @@ fn parse_callback(target: &str) -> CallbackOutcome {
     }
     let mut code = None;
     let mut error = None;
+    let mut description = None;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "code" => code = Some(value.into_owned()),
             "error" => error = Some(value.into_owned()),
+            "error_description" => description = Some(value.into_owned()),
             _ => {}
         }
     }
     match (code, error) {
-        (_, Some(error)) => CallbackOutcome::Error(error),
+        // The description is for people; the code is for when there is none.
+        (_, Some(error)) => CallbackOutcome::Error(description.unwrap_or(error)),
         (Some(code), None) => CallbackOutcome::Code(code),
         (None, None) => CallbackOutcome::Error("callback carried no code".into()),
     }
@@ -302,6 +305,17 @@ mod tests {
         assert_eq!(
             parse_callback("/callback?error=access_denied&code=ignored"),
             CallbackOutcome::Error("access_denied".into())
+        );
+    }
+
+    /// A refusal from the control plane reads as a sentence, not `access_denied`.
+    #[test]
+    fn a_refusal_shows_the_description_when_there_is_one() {
+        assert_eq!(
+            parse_callback(
+                "/callback?error=access_denied&error_description=This%20account%20is%20not%20allowed"
+            ),
+            CallbackOutcome::Error("This account is not allowed".into())
         );
     }
 

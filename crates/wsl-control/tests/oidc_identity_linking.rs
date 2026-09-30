@@ -27,6 +27,7 @@ fn identity(subject: &str, email: &str) -> VerifiedIdentity {
         subject: subject.into(),
         email: email.into(),
         display_name: Some("Test Person".into()),
+        hosted_domain: None,
     }
 }
 
@@ -227,6 +228,7 @@ async fn the_same_subject_at_two_issuers_is_two_people(pool: PgPool) {
             subject: "shared-subject".into(),
             email: "grace@example.com".into(),
             display_name: None,
+            hosted_domain: None,
         },
     )
     .await

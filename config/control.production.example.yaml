@@ -49,6 +49,18 @@ identity:
     # schemes are first come, first served. See docs/IOS.md.
     # native_schemes:
     #   - io.wsl.zerotrust
+  # Who may sign in, beyond "the provider verified them". The provider proves
+  # who someone is; this decides whether they belong here. See docs/OIDC.md.
+  admission:
+    # `directory`: only people OpsAPI (or SCIM) has provisioned may sign in; a
+    # first login links to the provisioned user and never creates one.
+    # `jit`: a first login by any verified identity creates a user.
+    provisioning: directory
+    # Google Workspace only: accept accounts whose id_token `hd` claim is one of
+    # these. Required with Google unless provisioning is `directory`, because
+    # Google signs in anyone with a Google account.
+    # hosted_domains:
+    #   - example.com
 
 wireguard:
   default_port: 51820

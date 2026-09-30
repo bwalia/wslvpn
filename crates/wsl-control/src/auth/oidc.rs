@@ -1,6 +1,7 @@
 use crate::auth::oidc_provider::{
     peek_key_id, verify_id_token, OidcError, ProviderMetadata, VerifiedIdentity,
 };
+use crate::config::Provisioning;
 use crate::error::{AppError, AppResult};
 use crate::state::{hash_token, AppState};
 use axum::{
@@ -266,7 +267,25 @@ pub async fn callback(
 
     let identity = verify(&state, &metadata, id_token, Some(&nonce)).await?;
     let email = identity.email.clone();
-    let user_id = resolve_user(&state, &identity).await?;
+    let user_id = match resolve_user(&state, &identity).await {
+        Ok(user_id) => user_id,
+        // A native client is waiting on the other end of `client_redirect_uri`
+        // for a code that is not coming. Tell it, the way OAuth tells a client
+        // it was refused (RFC 6749 §4.1.2.1), so the app can say why at once
+        // instead of timing out while the browser shows a bare 401. The
+        // redirect target is the one validated when the handshake started.
+        Err(AppError::Unauthorized) if client_redirect_uri.is_some() => {
+            let redirect = client_redirect_uri.as_deref().unwrap_or_default();
+            let mut target = url::Url::parse(redirect)
+                .map_err(|e| AppError::bad_request(format!("stored redirect_uri: {e}")))?;
+            target
+                .query_pairs_mut()
+                .append_pair("error", "access_denied")
+                .append_pair("error_description", ACCESS_DENIED);
+            return Ok(Redirect::temporary(target.as_str()).into_response());
+        }
+        Err(e) => return Err(e),
+    };
 
     // A native client gets a one-time code, not a token: the browser is not
     // the thing that asked to log in, and a token in a redirect URL would
@@ -303,6 +322,12 @@ pub async fn callback(
     })
     .into_response())
 }
+
+/// What a refused person is told. Deliberately the same for every reason —
+/// not provisioned, wrong Workspace, deactivated — so the message does not
+/// help anyone map which accounts exist.
+const ACCESS_DENIED: &str =
+    "This account is not allowed to sign in to this VPN. Ask your administrator for access.";
 
 /// How long a native client has to redeem its code. It is a local round trip
 /// on the machine that just completed the browser flow, so the window can be
@@ -444,6 +469,26 @@ async fn verify(
 ///   * A changed email address moves with the existing binding instead of
 ///     creating or matching another user.
 pub async fn resolve_user(state: &AppState, identity: &VerifiedIdentity) -> AppResult<Uuid> {
+    let admission = &state.config.identity.admission;
+    // Before anything touches the database: a login from outside the allowed
+    // Workspace domains leaves no trace but the log line.
+    if !admission.hosted_domains.is_empty() {
+        let admitted = identity.hosted_domain.as_deref().is_some_and(|hd| {
+            admission
+                .hosted_domains
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(hd))
+        });
+        if !admitted {
+            tracing::warn!(
+                issuer = %identity.issuer,
+                hosted_domain = identity.hosted_domain.as_deref().unwrap_or("-"),
+                "denied: login from outside the allowed hosted domains"
+            );
+            return Err(AppError::Unauthorized);
+        }
+    }
+
     let mut tx = state.db.begin().await?;
 
     let bound: Option<(Uuid,)> =
@@ -505,6 +550,16 @@ pub async fn resolve_user(state: &AppState, identity: &VerifiedIdentity) -> AppR
                     }
                     link(&mut tx, identity, user_id).await?;
                     user_id
+                }
+                None if admission.provisioning == Provisioning::Directory => {
+                    // Nobody provisioned this person. The directory decides who
+                    // is in, and it has not said yes.
+                    tracing::warn!(
+                        issuer = %identity.issuer,
+                        email = %identity.email,
+                        "denied: login by someone the directory has not provisioned"
+                    );
+                    return Err(AppError::Unauthorized);
                 }
                 None => {
                     let user_id: Uuid = sqlx::query_scalar(

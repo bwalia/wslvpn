@@ -38,6 +38,68 @@ alone, because that one is for the browser. The issuer itself is still compared
 strictly against both the discovery document and every token's `iss` claim — only
 the address dialled changes.
 
+## Who is admitted
+
+The provider proves who someone is. Whether they belong here is decided by
+`identity.admission`, checked in one place (`resolve_user`) on every login:
+
+```yaml
+identity:
+  admission:
+    provisioning: directory      # or jit (the default)
+    hosted_domains: [example.com]  # Google Workspace only; optional
+```
+
+- **`provisioning: directory`** — only people the directory has provisioned may
+  sign in. OpsAPI provisions them with `POST /api/v1/ops/users` (or SCIM); their
+  first login links the provider's subject to that user, and a login by anyone
+  else is refused without creating anything. Disabling a user in OpsAPI
+  (`POST /api/v1/ops/users/{id}/disable`) stops their next login. Administrators
+  listed in `bootstrap.admin_emails` are pre-created, so they are always
+  admitted.
+- **`provisioning: jit`** — a first login by any verified identity creates a
+  user. Right for a private provider whose every account is already yours.
+- **`hosted_domains`** — Google Workspace domains, compared with the id_token's
+  `hd` claim. Not with the email domain: a consumer Google account can carry a
+  verified address at any domain, including yours, and has no `hd`.
+
+With Google as the issuer, `jit` and no `hosted_domains` would admit every
+Google account in the world, so the control plane refuses to start that way.
+
+This is how the two systems divide the work (see
+[ADR-0003](decisions/0003-opsapi-is-a-directory-not-a-provider.md)): Google
+authenticates, OpsAPI decides who is in. OpsAPI credentials are never used to
+sign in, and WSLVPN never validates an OpsAPI token.
+
+## Google
+
+1. In Google Cloud Console → *APIs & Services* → *Credentials*, create an
+   **OAuth client ID** of type **Web application**. Google issues a client
+   secret for it; the control plane is a confidential client, so that is right.
+2. Add the control plane's callback as an **authorized redirect URI**:
+   `https://vpn.example.com/auth/oidc/callback`. The desktop app and CLI never
+   talk to Google directly — they sign in through the control plane — so no
+   loopback or custom-scheme redirect is registered with Google.
+3. On the *OAuth consent screen*, choose **Internal** if you use Google
+   Workspace: Google itself then refuses accounts outside your organisation.
+4. Configure the control plane:
+
+```yaml
+identity:
+  oidc:
+    issuer: "https://accounts.google.com"
+    client_id: "${WSL_OIDC_CLIENT_ID}"        # …apps.googleusercontent.com
+    client_secret: "${WSL_OIDC_CLIENT_SECRET}"
+    scopes: [openid, email, profile]
+    redirect_uri: "https://vpn.example.com/auth/oidc/callback"
+  admission:
+    provisioning: directory
+    hosted_domains: [example.com]
+```
+
+Discovery, keys, `iss`, `aud`, `exp`, `nonce` and `email_verified` are handled
+exactly as for any provider; Google needs no special casing beyond `hd`.
+
 ## Endpoints
 
 - `GET /auth/oidc/authorize` — start login. Stores the PKCE verifier for the
