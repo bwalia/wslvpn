@@ -74,10 +74,11 @@ External Secrets can only use a pre-issued wslvault token, and an API key
 yields one that lasts an hour, so the `wslvault-token-refresh` CronJob
 exchanges a machine key for a fresh token every 30 minutes. That key lives in
 tenant `01a0f39f-…`, carries only the read-only `wslvpn-read` policy
-(`{"paths":["secret/wslvpn/**"],"capabilities":["read"]}`, already created)
+(`{"paths":["secret/data/wslvpn/**"],"capabilities":["read"]}`, already created)
 and does not require MFA.
 
 ```bash
+kubectl -n wslvpn create secret generic wslvault-session --from-literal=token=   # once
 bash deploy/scripts/wslvault-refresher-key.sh     # bash, not zsh
 kubectl -n wslvpn patch cronjob wslvault-token-refresh -p '{"spec":{"suspend":false}}'
 kubectl -n wslvpn create job --from=cronjob/wslvault-token-refresh wslvault-token-refresh-first
@@ -87,9 +88,10 @@ kubectl -n wslvpn logs -f job/wslvault-token-refresh-first   # "refreshed wslvau
 The script prompts for an admin credential and stores the new key without
 printing it. **Which credential matters:** wslvault creates a key in the tenant
 of whoever signs in, whatever the request names — so a root or platform key from
-another tenant creates it over there. Use either an admin key *in* tenant
-`01a0f39f-…`, or the bootstrap admin token (`X-Admin-Token`), which may name
-any tenant. The script refuses a signed-in key from another tenant, and checks
+another tenant creates it over there. In practice only the bootstrap admin token
+(`X-Admin-Token`, in `wslvault/wslvault-mesh-keys`, key `admin-token`) can do
+this: a signed-in caller needs the *platform* policy and always mints in its
+own tenant, so even a tenant admin in `01a0f39f-…` is refused. The script refuses a signed-in key from another tenant, and checks
 the new key's tenant and MFA before storing it; if either is wrong it stores
 nothing and prints the key's id to revoke.
 

@@ -10,22 +10,15 @@
 # already synced are kept, so running pods are unaffected; fix the job, and it
 # recovers on the next run.
 #
-# The API key itself is created out of band — see README, "wslvault tenant":
+# Created out of band, once — see README, step 1b:
 #   Secret wslvault-api-key, key `api_key`: a wslv_ machine key in the tenant
-#   below, without MFA, with a policy that can only read kv/wslvpn/*.
+#   below, without MFA, carrying only `wslvpn-read`.
+#   Secret wslvault-session, key `token`: where the refresher writes the token.
+#   It is deliberately NOT in this file: re-applying an empty token here would
+#   wipe the live one until the next refresh. The refresher can only patch it,
+#   so it must exist before the first run:
+#     kubectl -n wslvpn create secret generic wslvault-session --from-literal=token=
 
-apiVersion: v1
-kind: Secret
-metadata:
-  name: wslvault-session
-  namespace: wslvpn
-  annotations:
-    wslvpn/written-by: wslvault-token-refresh
-type: Opaque
-# Created empty so the refresher only ever needs to patch this one object.
-stringData:
-  token: ""
----
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -83,6 +76,9 @@ spec:
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
+            # The key file is mounted group-owned by this, so the non-root
+            # user can read it; nothing else in the pod is.
+            fsGroup: 65534
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: refresh
@@ -135,7 +131,9 @@ spec:
             - name: key
               secret:
                 secretName: wslvault-api-key
-                defaultMode: 0400
+                # Owner root, group fsGroup: 0400 would be root-only, which the
+                # non-root refresher cannot read.
+                defaultMode: 0440
             # In memory: the token never touches a node's disk.
             - name: work
               emptyDir: { medium: Memory, sizeLimit: 1Mi }
