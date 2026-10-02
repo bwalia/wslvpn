@@ -35,6 +35,8 @@ ingress:
 
 config:
   publicUrl: "https://vpn.workstation.co.uk"
+  # Shown on the landing page at / and anywhere else the product names itself.
+  productDisplayName: "Workstation WSL VPN"
   exposeDocs: false
   oidc:
     issuer: https://accounts.google.com

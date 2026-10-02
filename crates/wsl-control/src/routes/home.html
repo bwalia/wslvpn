@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{name}}</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16191d; --muted: #5b6470;
+    --line: #e2e5ea; --accent: #2457d6; --ok: #1a7f4b; --bad: #b42318;
+    --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #171b21; --text: #e7eaee; --muted: #9aa3ae;
+      --line: #2a3038; --accent: #7aa2ff; --ok: #4cc38a; --bad: #ff7b72;
+      --code: #222831;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 8px; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--muted); margin-bottom: 28px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  .status { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .ok .dot { background: var(--ok); }
+  .ok .label { color: var(--ok); }
+  .degraded .dot { background: var(--bad); }
+  .degraded .label { color: var(--bad); }
+  .meta { color: var(--muted); font-size: 0.875rem; margin: 6px 0 0; }
+  ol { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 10px; }
+  li:last-child { margin-bottom: 0; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.875rem; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  pre {
+    background: var(--code); padding: 12px; border-radius: 6px; margin: 8px 0 0;
+    overflow-x: auto;
+  }
+  a { color: var(--accent); }
+  footer { color: var(--muted); font-size: 0.875rem; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{name}}</h1>
+  <p class="lede">Zero-trust network access. Every connection is signed in,
+  checked against the device's security posture and authorised by policy
+  before any traffic reaches a private network.</p>
+
+  <section class="card {{status_class}}" aria-labelledby="status-heading">
+    <h2 id="status-heading">Service status</h2>
+    <div class="status"><span class="dot" aria-hidden="true"></span><span class="label">{{status}}</span></div>
+    <p class="meta">{{status_detail}}</p>
+  </section>
+
+  <section class="card" aria-labelledby="connect-heading">
+    <h2 id="connect-heading">How to connect</h2>
+    <ol>
+      <li><strong>Desktop app.</strong> Open <em>WSL Zero Trust</em>, set the
+      server to <code>{{url}}</code> and sign in with your organisation's
+      Google account.</li>
+      <li><strong>Command line.</strong>
+<pre>wsl --control-url {{url}} login
+wsl connect --network &lt;network&gt;</pre></li>
+    </ol>
+  </section>
+
+  <section class="card" aria-labelledby="access-heading">
+    <h2 id="access-heading">Access</h2>
+    <p>This address is the VPN's control plane, not a website to browse.
+    Accounts are provisioned by your administrator; if sign-in says you are
+    not admitted, ask them to add you.</p>
+  </section>
+
+  <footer>{{name}} · version {{version}}</footer>
+</main>
+</body>
+</html>

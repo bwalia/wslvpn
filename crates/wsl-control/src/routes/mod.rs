@@ -4,6 +4,7 @@ pub mod gateways;
 pub mod gitops;
 pub mod groups;
 pub mod health;
+pub mod home;
 pub mod networks;
 pub mod ops;
 pub mod policies;
@@ -33,7 +34,7 @@ pub use shutdown::signal as shutdown_signal;
 /// signature — `AuthUser`, `AdminUser`, `OpsAuth` or `GatewayAuth`. The two
 /// deliberate exceptions are `/gateways/register`, which authenticates with the
 /// enrollment secret carried in its body, and the unauthenticated surface
-/// below: health, metrics and the OIDC handshake.
+/// below: the landing page, health, metrics and the OIDC handshake.
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/users", get(users::list).post(users::create))
@@ -86,6 +87,7 @@ pub fn router(state: AppState) -> Router {
         ));
 
     let mut app = Router::new()
+        .route("/", get(home::home))
         .route("/health", get(health::health))
         .route("/livez", get(health::livez))
         .route("/readyz", get(health::readyz))
