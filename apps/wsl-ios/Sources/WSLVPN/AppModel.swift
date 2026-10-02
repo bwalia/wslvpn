@@ -44,6 +44,17 @@ public final class AppModel {
     /// it is written once and shared.
     static let keychainAccessGroup = "io.wsl.zerotrust"
 
+    /// Whether the configured control plane is on this machine.
+    ///
+    /// Mirrors the rule the control plane enforces on itself: it refuses to
+    /// serve `/auth/dev/login` unless its own public URL is loopback. Checking
+    /// the same thing here means the app never offers a sign-in that cannot
+    /// work, and never offers one against a real deployment.
+    public var controlPlaneIsLocal: Bool {
+        guard let host = controlPlaneURL.host else { return false }
+        return ["127.0.0.1", "::1", "localhost"].contains(host)
+    }
+
     public var controlPlaneURL: URL {
         // Settable in Settings.bundle or by an MDM-pushed configuration; the
         // default is the loopback address a developer runs the control plane on.
@@ -93,6 +104,29 @@ public final class AppModel {
         }
     }
 
+    /// Sign in against a local development control plane.
+    ///
+    /// The identity provider in the Compose stack is reachable only from inside
+    /// the docker network, so the browser flow cannot complete from a simulator.
+    /// This is the same door the CLI's `--dev` opens, and the control plane
+    /// guards it the same way: it answers only when bound to loopback.
+    public func signInWithDevLogin(email: String) async {
+        guard controlPlaneIsLocal else { return }
+        await perform {
+            let client = ControlPlaneClient(baseURL: self.controlPlaneURL)
+            let token = try await client.devLogin(email: email)
+
+            try self.keychain.set(token.accessToken, for: .accessToken)
+            await client.setAccessToken(token.accessToken)
+            self.client = client
+            self.email = token.email
+            self.phase = .signedIn
+
+            try await self.registerDevice()
+            await self.refreshNetworks()
+        }
+    }
+
     public func signOut() async {
         await perform {
             try? await self.tunnel.stop()
@@ -122,7 +156,18 @@ public final class AppModel {
     }
 
     public func connect() async {
-        guard let client, let network = selectedNetwork else { return }
+        // Returning silently here is how a button press becomes nothing at all.
+        // Both of these are states a user can reach — signed out by an expired
+        // token, or pressing Connect before the network list has arrived — and
+        // both deserve a sentence rather than a shrug.
+        guard let client else {
+            errorMessage = ControlPlaneClient.ClientError.notSignedIn.localizedDescription
+            return
+        }
+        guard let network = selectedNetwork else {
+            errorMessage = "No network selected yet. Pull to refresh if the list is empty."
+            return
+        }
         await perform {
             let deviceID = try await self.ensureDevice()
             self.posture = Posture.collect()

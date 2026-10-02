@@ -62,7 +62,21 @@ public struct Keychain: Sendable {
         attributes[kSecAttrAccessible as String] =
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
-        let status = SecItemAdd(attributes as CFDictionary, nil)
+        var status = SecItemAdd(attributes as CFDictionary, nil)
+
+        // A shared access group needs an entitlement Apple grants against a
+        // real App ID. A build that does not carry one — a simulator preview —
+        // is refused here rather than at install time. Falling back keeps that
+        // build usable; on a device with the entitlement this branch is never
+        // reached, and if it somehow were, the extension not finding the key is
+        // a visible failure rather than a silent one.
+        if status == errSecMissingEntitlement, accessGroup != nil {
+            var fallback = attributes
+            fallback.removeValue(forKey: kSecAttrAccessGroup as String)
+            SecItemDelete(fallback as CFDictionary)
+            status = SecItemAdd(fallback as CFDictionary, nil)
+        }
+
         guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
     }
 
@@ -72,14 +86,20 @@ public struct Keychain: Sendable {
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data
-        else { return nil }
+        var status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecMissingEntitlement, accessGroup != nil {
+            query.removeValue(forKey: kSecAttrAccessGroup as String)
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+        }
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
     public func remove(_ item: Item) {
         SecItemDelete(query(for: item) as CFDictionary)
+        var withoutGroup = query(for: item)
+        withoutGroup.removeValue(forKey: kSecAttrAccessGroup as String)
+        SecItemDelete(withoutGroup as CFDictionary)
     }
 
     /// Return the stored private key, creating one on first use.

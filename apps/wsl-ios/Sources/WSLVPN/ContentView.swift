@@ -24,6 +24,7 @@ struct ContentView: View {
 
 struct SignInView: View {
     @Environment(AppModel.self) private var model
+    @State private var devEmail = "alice@example.com"
 
     var body: some View {
         VStack(spacing: 20) {
@@ -50,6 +51,29 @@ struct SignInView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+
+            // Only against a control plane on this machine, which is the same
+            // condition under which the control plane will answer at all.
+            if model.controlPlaneIsLocal {
+                VStack(spacing: 6) {
+                    Divider()
+                    Text("Development")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("you@example.com", text: $devEmail)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Developer sign-in") {
+                        Task { await model.signInWithDevLogin(email: devEmail) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.busy || devEmail.isEmpty)
+                    .accessibilityIdentifier("dev-sign-in")
+                }
+                .padding(.top, 8)
+            }
+
             ErrorText()
             Spacer()
         }
@@ -66,6 +90,7 @@ struct StatusView: View {
         List {
             Section {
                 LabeledContent("Status", value: model.tunnelStatus.label)
+                    .accessibilityIdentifier("tunnel-status")
                 if let state = model.sessionState {
                     LabeledContent("Network", value: state.networkName)
                     LabeledContent("Address", value: state.assignedIP)
@@ -74,6 +99,13 @@ struct StatusView: View {
                 if let email = model.email {
                     LabeledContent("Signed in", value: email)
                 }
+            }
+
+            // Directly under the status, not in the footer of the last section.
+            // An error from pressing Connect belongs where it can be read
+            // without scrolling past everything else to find it.
+            if model.errorMessage != nil {
+                Section { ErrorText() }
             }
 
             Section("Posture") {
@@ -94,6 +126,7 @@ struct StatusView: View {
                     }
                     Button("Connect") { Task { await model.connect() } }
                         .disabled(model.busy || model.selectedNetwork == nil)
+                        .accessibilityIdentifier("connect")
                 }
             } else {
                 Section {
@@ -107,8 +140,7 @@ struct StatusView: View {
             Section {
                 Button("Sign out") { Task { await model.signOut() } }
                     .disabled(model.busy)
-            } footer: {
-                ErrorText()
+                    .accessibilityIdentifier("sign-out")
             }
         }
         .refreshable { await model.refreshNetworks() }
@@ -161,6 +193,7 @@ struct ErrorText: View {
             Text(message)
                 .font(.footnote)
                 .foregroundStyle(.red)
+                .accessibilityIdentifier("error-text")
         }
     }
 }
