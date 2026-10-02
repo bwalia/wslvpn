@@ -106,6 +106,61 @@ targets:
           command -v go >/dev/null || { echo "error: go is required to build wireguard-go" >&2; exit 1; }
           make -C "$CHECKOUT" build
 
+  # The app without its tunnel, so it can be run on a simulator.
+  #
+  # Not a convenience: a packet tunnel cannot work on a simulator at all.
+  # WireGuardKit links a Go archive with no simulator slice, so WSLTunnel does
+  # not even link there — and if it did, the Network Extension would still not
+  # load, because the Simulator does not implement them. Everything above the
+  # tunnel is real, runs, and talks to a real control plane over the host's
+  # loopback. `TunnelController` says so plainly rather than failing obscurely.
+  WSLVPNPreview:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/WSLVPN
+    dependencies:
+      - target: WSLKit
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.preview
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        INFOPLIST_FILE: Sources/WSLVPN/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        PRODUCT_NAME: WSL Zero Trust
+        # Signed, ad-hoc, for the simulator.
+        #
+        # Not cosmetic: an unsigned app carries no entitlements at all, and
+        # without an application-identifier every keychain call returns
+        # errSecMissingEntitlement (-34018). The symptom is a sign-in that gets
+        # its token, fails to store it, and stops — with a successful request in
+        # the network log and nothing to explain what went wrong.
+        #
+        # No entitlements file: the Network Extension and shared keychain group
+        # are granted by Apple against a real App ID, and this target wants
+        # neither. Ad-hoc signing gives it the identity the keychain needs and
+        # nothing more.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_ENTITLEMENTS: ""
+        DEVELOPMENT_TEAM: ""
+
+  # Drives the running app against a live control plane. Kept out of the
+  # default schemes on purpose: it needs `make dev` up.
+  WSLVPNUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/WSLVPNUITests
+    dependencies:
+      - target: WSLVPNPreview
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: WSLVPNPreview
+
   WSLKitTests:
     type: bundle.unit-test
     platform: iOS
@@ -113,10 +168,16 @@ targets:
       - path: Tests/WSLKitTests
     dependencies:
       - target: WSLKit
+      - target: WSLVPNPreview
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.wsl.zerotrust.ios.kit.tests
         GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/WSL Zero Trust.app/WSL Zero Trust
+        BUNDLE_LOADER: $(TEST_HOST)
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        DEVELOPMENT_TEAM: ""
 
 schemes:
   WSLVPN:
@@ -131,12 +192,24 @@ schemes:
       targets:
         - WSLKitTests
 
+  WSLVPNPreview:
+    build:
+      targets:
+        WSLVPNPreview: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - WSLVPNUITests
+
   # Builds and tests only what does not depend on the Go library, so it runs on
   # a simulator. This is the scheme CI can use.
   WSLKit:
     build:
       targets:
         WSLKit: all
+        WSLVPNPreview: [test]
         WSLKitTests: [test]
     test:
       config: Debug

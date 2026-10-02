@@ -13,13 +13,34 @@ import WSLKit
 public final class TunnelController {
     public enum ControllerError: Error, LocalizedError {
         case noManager
+        case unavailableOnSimulator
 
         public var errorDescription: String? {
             switch self {
             case .noManager:
                 return "The VPN configuration has not been installed yet."
+            case .unavailableOnSimulator:
+                return """
+                    A tunnel cannot run on a simulator: the Simulator does not \
+                    implement Network Extensions. Everything up to this point \
+                    is real — sign-in, device registration, policy evaluation \
+                    and the session the gateway just issued. Build to a device \
+                    to carry traffic.
+                    """
             }
         }
+    }
+
+    /// Whether a tunnel could run here at all.
+    ///
+    /// Not a build flag: a packet tunnel cannot work on a simulator whichever
+    /// target produced the binary, so the honest test is the environment.
+    public static var isSupported: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return true
+        #endif
     }
 
     private let tunnelBundleIdentifier = "io.wsl.zerotrust.ios.tunnel"
@@ -33,6 +54,7 @@ public final class TunnelController {
     }
 
     public func load() async throws {
+        guard TunnelController.isSupported else { return }
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
         manager = managers.first
     }
@@ -43,6 +65,9 @@ public final class TunnelController {
     /// written at the moment of connecting and removed on disconnect rather
     /// than left in the system's VPN preferences between sessions.
     public func start(request: TunnelRequest, serverDescription: String) async throws {
+        guard TunnelController.isSupported else {
+            throw ControllerError.unavailableOnSimulator
+        }
         let manager = try await existingOrNewManager()
 
         let proto = NETunnelProviderProtocol()
