@@ -79,6 +79,39 @@ pub struct IdentityConfig {
     /// Who may sign in at all, beyond "the provider verified them".
     #[serde(default)]
     pub admission: AdmissionConfig,
+    /// Signing in with an OpsAPI account, verified by asking OpsAPI. Absent
+    /// means the option is not offered.
+    #[serde(default)]
+    pub opsapi: Option<OpsApiConfig>,
+}
+
+/// OpsAPI as a way to sign in.
+///
+/// OpsAPI is not an OIDC provider and its tokens are HS256 under a secret this
+/// process must never hold (ADR-0003). So a token is never verified here; it is
+/// handed back to OpsAPI's `/auth/me`, and the answer is then checked against
+/// the directory over SCIM with this deployment's own API key (ADR-0004).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpsApiConfig {
+    /// OpsAPI's base URL, e.g. `https://api.example.com`. The desktop app is
+    /// told it, and signs in there directly: a password never passes through
+    /// the control plane.
+    pub url: String,
+    /// The workspace (namespace slug) a person must be an active member of.
+    /// OpsAPI has open sign-up; an account alone is not membership.
+    pub namespace: String,
+    /// An `opsk_` API key belonging to a platform administrator, for the SCIM
+    /// lookups. Never sent to clients.
+    pub api_key: String,
+    /// Ask the directory again on every connect, so someone deprovisioned in
+    /// OpsAPI is stopped at their next connect rather than when their WSL
+    /// token expires.
+    #[serde(default = "default_true")]
+    pub verify_on_connect: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Which verified logins are admitted.
@@ -308,6 +341,9 @@ impl Config {
             validate_native_scheme(scheme)?;
         }
         self.validate_admission()?;
+        if let Some(opsapi) = &self.identity.opsapi {
+            validate_opsapi(opsapi)?;
+        }
         if self.database.max_connections == 0 {
             anyhow::bail!("database.max_connections must be at least 1");
         }
@@ -355,6 +391,26 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_opsapi(opsapi: &OpsApiConfig) -> Result<()> {
+    let url = url::Url::parse(&opsapi.url)
+        .with_context(|| format!("identity.opsapi.url: '{}' is not a URL", opsapi.url))?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    // People type their password into this. Plain http is for a laptop only.
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        anyhow::bail!("identity.opsapi.url must be https (http only to this machine)");
+    }
+    if opsapi.namespace.trim().is_empty() {
+        anyhow::bail!(
+            "identity.opsapi.namespace is required: anyone can create an OpsAPI account, \
+             so membership of your workspace is what admits them"
+        );
+    }
+    if !opsapi.api_key.starts_with("opsk_") || opsapi.api_key.len() < 20 {
+        anyhow::bail!("identity.opsapi.api_key must be an OpsAPI API key (opsk_...)");
+    }
+    Ok(())
 }
 
 /// Expand `${VAR}` in every string in a parsed document.
@@ -475,6 +531,63 @@ bootstrap: {{ ops_service_token: "0123456789abcdef", gateway_registration_token:
         let mut config: Config = serde_yaml::from_str(&yaml).expect("parse");
         config.identity.admission = admission;
         config
+    }
+
+    fn with_opsapi(url: &str, namespace: &str, key: &str) -> Config {
+        let mut config = config_with("https://idp.example.com", AdmissionConfig::default());
+        config.identity.opsapi = Some(OpsApiConfig {
+            url: url.into(),
+            namespace: namespace.into(),
+            api_key: key.into(),
+            verify_on_connect: true,
+        });
+        config
+    }
+
+    const KEY: &str = "opsk_0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn an_opsapi_section_parses_and_verifies_on_connect_by_default() {
+        let yaml = "url: https://api.example.com\nnamespace: workstation\napi_key: opsk_x\n";
+        let parsed: OpsApiConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert!(parsed.verify_on_connect);
+        assert!(with_opsapi("https://api.example.com", "workstation", KEY)
+            .validate()
+            .is_ok());
+        assert!(with_opsapi("http://127.0.0.1:4077", "workstation", KEY)
+            .validate()
+            .is_ok());
+    }
+
+    /// People type their OpsAPI password into the app, which sends it there.
+    #[test]
+    fn opsapi_over_plain_http_to_another_host_is_refused() {
+        let err = with_opsapi("http://api.example.com", "workstation", KEY)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("https"), "{err}");
+    }
+
+    /// OpsAPI has open sign-up. Without a workspace, any account would do.
+    #[test]
+    fn opsapi_without_a_namespace_is_refused() {
+        let err = with_opsapi("https://api.example.com", " ", KEY)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("namespace"), "{err}");
+    }
+
+    #[test]
+    fn opsapi_needs_an_api_key_not_a_password_or_jwt() {
+        for key in ["", "hunter2", "eyJhbGciOiJIUzI1NiJ9.e30.x"] {
+            let err = with_opsapi("https://api.example.com", "workstation", key)
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("opsk_"), "{key}: {err}");
+        }
     }
 
     /// With Google as the provider and nothing else configured, every Google

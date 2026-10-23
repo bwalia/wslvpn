@@ -39,6 +39,7 @@ export function dashboard(status) {
           : null,
       ),
     },
+    warning: otherVpnWarning(status),
     showConnect: !connected,
     showDisconnect: connected,
     showNetworkPicker: !direct && !connected,
@@ -139,4 +140,66 @@ export function controlUrlProblem(text) {
 export function profileNameFromFile(fileName) {
   const stem = fileName.replace(/\.conf$/i, "");
   return stem || "WireGuard";
+}
+
+/**
+ * Which sign-in buttons to offer, from `wsl sign-in-methods --json`. When the
+ * methods could not be read, browser sign-in is still offered: it is what
+ * every control plane serves.
+ */
+export function signInOptions(methods) {
+  const opsapi = methods?.opsapi;
+  return {
+    browser: methods?.oidc ?? true,
+    opsapi: opsapi
+      ? {
+          label: "Sign in with OpsAPI",
+          hint: `Your ${opsapi.namespace} account at ${hostOf(opsapi.url)}. ` +
+            "The password goes to OpsAPI, not to the VPN.",
+        }
+      : null,
+  };
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** Check the OpsAPI form before sending anything. */
+export function opsapiProblem(email, password) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return "Enter your email address";
+  }
+  if (!password) return "Enter your password";
+  return null;
+}
+
+/** What follows `wsl login --opsapi --json`. */
+export function afterOpsapiSignIn(result) {
+  if (result?.status === "code_required") {
+    return {
+      step: "code",
+      challenge: result.challenge,
+      prompt: `Enter the code sent to ${result.email}`,
+    };
+  }
+  return { step: "done" };
+}
+
+/**
+ * The official WireGuard app's tunnels run beside ours. Two tunnels claiming
+ * the same routes is the usual reason "connected" carries no traffic.
+ */
+export function otherVpnWarning(status) {
+  const names = (status.other_wireguard ?? []).map((n) => `“${n}”`);
+  if (!names.length) return null;
+  const list = names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return `The WireGuard app also has ${list} connected. If both tunnels route ` +
+    "the same addresses, disconnect one of them.";
 }

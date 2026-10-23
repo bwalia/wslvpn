@@ -90,10 +90,14 @@ pub fn find_cli() -> Option<PathBuf> {
         }
     }
     search_path("wsl").or_else(|| {
-        ["/opt/homebrew/bin/wsl", "/usr/local/bin/wsl", "/usr/bin/wsl"]
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file())
+        [
+            "/opt/homebrew/bin/wsl",
+            "/usr/local/bin/wsl",
+            "/usr/bin/wsl",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
     })
 }
 
@@ -171,6 +175,71 @@ async fn networks() -> Result<serde_json::Value, CliError> {
 async fn sign_in() -> Result<serde_json::Value, CliError> {
     run(&["login"]).await?;
     status().await
+}
+
+/// Which ways of signing in the configured control plane offers.
+#[tauri::command]
+async fn sign_in_methods() -> Result<serde_json::Value, CliError> {
+    run_json(&["sign-in-methods", "--json"]).await
+}
+
+/// The arguments and stdin for an OpsAPI sign-in. Separate so the test can
+/// check that the password is only ever on stdin: argv is visible to every
+/// user on the machine through `ps`.
+fn opsapi_sign_in_call(email: &str, password: &str) -> (Vec<String>, String) {
+    (
+        vec![
+            "login".into(),
+            "--opsapi".into(),
+            // `=` keeps an address that starts with `-` from being read as a flag.
+            format!("--email={email}"),
+            "--stdin".into(),
+            "--json".into(),
+        ],
+        format!("{password}\n"),
+    )
+}
+
+fn opsapi_code_call(challenge: &str, code: &str) -> (Vec<String>, String) {
+    (
+        vec![
+            "login".into(),
+            "--opsapi".into(),
+            "--code".into(),
+            "--stdin".into(),
+            "--json".into(),
+        ],
+        format!("{challenge}\n{code}\n"),
+    )
+}
+
+async fn run_call(call: (Vec<String>, String)) -> Result<serde_json::Value, CliError> {
+    let (args, input) = call;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stdout = run_with_input(&args, Some(&input)).await?;
+    // The last line is the outcome; anything before it is progress.
+    let last = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    serde_json::from_str(last)
+        .map_err(|e| CliError::bad_output(format!("could not read the CLI's output: {e}")))
+}
+
+/// Sign in with an OpsAPI account. Returns `{"status":"code_required",
+/// "challenge", "email"}` when OpsAPI emailed a code, else `signed_in`.
+#[tauri::command]
+async fn opsapi_sign_in(email: String, password: String) -> Result<serde_json::Value, CliError> {
+    run_call(opsapi_sign_in_call(&email, &password)).await
+}
+
+#[tauri::command]
+async fn opsapi_verify_code(
+    challenge: String,
+    code: String,
+) -> Result<serde_json::Value, CliError> {
+    run_call(opsapi_code_call(&challenge, &code)).await
 }
 
 #[tauri::command]
@@ -266,6 +335,9 @@ pub fn run_app() {
             status,
             networks,
             sign_in,
+            sign_in_methods,
+            opsapi_sign_in,
+            opsapi_verify_code,
             sign_out,
             connect,
             disconnect,
@@ -351,6 +423,20 @@ mod tests {
 
         std::env::remove_var(CLI_ENV);
         let _ = std::fs::remove_file(cli);
+    }
+
+    #[test]
+    fn opsapi_secrets_go_on_stdin_never_in_argv() {
+        let (args, input) = opsapi_sign_in_call("-alice@example.com", "s3cret pw");
+        assert!(args.iter().all(|a| !a.contains("s3cret")), "{args:?}");
+        assert!(args.contains(&"--email=-alice@example.com".to_string()));
+        assert_eq!(input, "s3cret pw\n");
+
+        let (args, input) = opsapi_code_call("challenge-token", "123456");
+        assert!(args
+            .iter()
+            .all(|a| !a.contains("challenge-token") && !a.contains("123456")));
+        assert_eq!(input, "challenge-token\n123456\n");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Step definitions for tests/features/connect.feature.
+//! Step definitions for tests/features/connect.feature and sign_in.feature.
 //!
 //! The agent runs for real against two stand-ins:
 //!
@@ -52,6 +52,105 @@ struct Plane {
     released: Vec<Uuid>,
     /// Shared with the fake wg-quick, so the order of events is observable.
     events: PathBuf,
+    /// The stand-in OpsAPI this control plane advertises, if any.
+    opsapi_url: Option<String>,
+    /// Every request body the control plane received, to prove what never
+    /// reached it.
+    bodies: Vec<String>,
+}
+
+/// OpsAPI as `routes/auth.lua` behaves: forms, an emailed code for alice,
+/// none for bob or the stranger, and its error envelope for a bad password.
+#[derive(Debug, Default)]
+struct OpsApi {
+    passwords_seen: Vec<String>,
+}
+
+type OpsShared = Arc<Mutex<OpsApi>>;
+
+async fn opsapi_login(
+    State(ops): State<OpsShared>,
+    axum::extract::Form(f): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let who = f.get("identifier").cloned().unwrap_or_default();
+    let password = f.get("password").cloned().unwrap_or_default();
+    ops.lock().unwrap().passwords_seen.push(password.clone());
+    if password != "right" {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(
+                serde_json::json!({ "error": { "code": "AUTH_INVALID_CREDENTIALS",
+                "message": "Invalid credentials" } }),
+            ),
+        );
+    }
+    if who == "alice@example.com" {
+        return (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({ "requires_2fa": true, "session_token": "challenge-alice",
+                "email": who }),
+            ),
+        );
+    }
+    let user = who.split('@').next().unwrap_or_default().to_string();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "token": format!("opsapi-jwt-{user}") })),
+    )
+}
+
+async fn opsapi_verify(
+    axum::extract::Form(f): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if f.get("session_token").map(String::as_str) == Some("challenge-alice")
+        && f.get("code").map(String::as_str) == Some("123456")
+    {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "token": "opsapi-jwt-alice" })),
+        )
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Invalid code" })),
+        )
+    }
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn methods(State(plane): State<Shared>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let url = plane.lock().unwrap().opsapi_url.clone();
+    Ok(Json(serde_json::json!({
+        "oidc": true,
+        "opsapi": url.map(|u| serde_json::json!({ "url": u, "namespace": "workstation" })),
+    })))
+}
+
+/// The control plane's side, which in reality asks OpsAPI /auth/me and SCIM;
+/// here alice and bob are admitted and anyone else is not.
+async fn opsapi_exchange(
+    State(plane): State<Shared>,
+    body: String,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    plane.lock().unwrap().bodies.push(body.clone());
+    let token: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let email = match token["token"].as_str() {
+        Some("opsapi-jwt-alice") => "alice@example.com",
+        Some("opsapi-jwt-bob") => "bob@example.com",
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+    Ok(Json(serde_json::json!({
+        "access_token": format!("wsl-token-for-{email}"),
+        "token_type": "Bearer",
+        "expires_in": 28800,
+        "user_id": Uuid::nil(),
+        "email": email,
+    })))
 }
 
 type Shared = Arc<Mutex<Plane>>;
@@ -158,6 +257,9 @@ struct Agent {
     plane: Option<(Shared, SocketAddr, tokio::task::JoinHandle<()>)>,
     state: AgentState,
     error: Option<String>,
+    opsapi: Option<(OpsShared, tokio::task::JoinHandle<()>)>,
+    /// A pending OpsAPI code request: (challenge, email).
+    code_request: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for Plane {
@@ -183,6 +285,8 @@ impl Agent {
             plane: None,
             state: AgentState::load().unwrap(),
             error: None,
+            opsapi: None,
+            code_request: None,
         }
     }
 
@@ -224,6 +328,9 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         if let Some((_, _, task)) = self.plane.take() {
+            task.abort();
+        }
+        if let Some((_, task)) = self.opsapi.take() {
             task.abort();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -293,6 +400,9 @@ async fn start_plane(w: &mut Agent, networks: Vec<Network>) {
     }));
     let app = Router::new()
         .route("/auth/dev/login", post(dev_login))
+        .route("/health", get(health))
+        .route("/auth/methods", get(methods))
+        .route("/auth/opsapi/exchange", post(opsapi_exchange))
         .route("/api/v1/devices/register", post(register))
         .route("/api/v1/networks", get(list_networks))
         .route("/api/v1/sessions", post(create_session))
@@ -304,6 +414,129 @@ async fn start_plane(w: &mut Agent, networks: Vec<Network>) {
         axum::serve(listener, app).await.unwrap();
     });
     w.plane = Some((plane, addr, task));
+    w.state.set_control_url(&format!("http://{addr}")).unwrap();
+    w.state.save().unwrap();
+}
+
+#[given("the control plane offers OpsAPI sign-in")]
+async fn plane_offers_opsapi(w: &mut Agent) {
+    let ops: OpsShared = Arc::default();
+    let app = Router::new()
+        .route("/auth/login", post(opsapi_login))
+        .route("/auth/2fa/verify", post(opsapi_verify))
+        .with_state(ops.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    w.plane().lock().unwrap().opsapi_url = Some(url);
+    w.opsapi = Some((ops, task));
+}
+
+async fn opsapi_sign_in(w: &mut Agent, email: &str, password: &str) {
+    let client = ControlClient::new();
+    let result = match client.opsapi_login(&mut w.state, email, password).await {
+        Ok(None) => client.ensure_device(&mut w.state).await.map(|_| ()),
+        Ok(Some(wsl_agent::opsapi::Step::CodeRequired { challenge, email })) => {
+            w.code_request = Some((challenge, email));
+            Ok(())
+        }
+        Ok(Some(other)) => panic!("unexpected step {other:?}"),
+        Err(e) => Err(e),
+    };
+    w.error = result.err().map(|e| format!("{e:#}"));
+}
+
+#[when(expr = "I sign in with OpsAPI as {string} with password {string}")]
+async fn sign_in_opsapi(w: &mut Agent, email: String, password: String) {
+    opsapi_sign_in(w, &email, &password).await;
+}
+
+#[given(expr = "I signed in with OpsAPI as {string}")]
+async fn signed_in_opsapi(w: &mut Agent, email: String) {
+    opsapi_sign_in(w, &email, "right").await;
+    assert_eq!(w.error, None);
+}
+
+#[then(expr = "I am asked for the code sent to {string}")]
+fn asked_for_code(w: &mut Agent, email: String) {
+    assert_eq!(w.error, None);
+    let (_, to) = w.code_request.as_ref().expect("a code request");
+    assert_eq!(to, &email);
+    assert!(
+        w.state.access_token.is_none(),
+        "not signed in before the code"
+    );
+}
+
+#[when(expr = "I enter the code {string}")]
+async fn enter_code(w: &mut Agent, code: String) {
+    let (challenge, _) = w.code_request.take().expect("a code request");
+    let client = ControlClient::new();
+    let mut result = client
+        .opsapi_verify_code(&mut w.state, &challenge, &code)
+        .await;
+    if result.is_ok() {
+        result = client.ensure_device(&mut w.state).await.map(|_| ());
+    }
+    w.error = result.err().map(|e| format!("{e:#}"));
+}
+
+#[then(expr = "I am signed in to the VPN as {string}")]
+fn signed_in_as(w: &mut Agent, email: String) {
+    assert_eq!(w.error, None);
+    w.reload();
+    assert_eq!(w.state.email.as_deref(), Some(email.as_str()));
+    assert_eq!(
+        w.state.access_token.as_deref(),
+        Some(format!("wsl-token-for-{email}").as_str()),
+        "the saved credential is the control plane's token, not OpsAPI's"
+    );
+    assert_eq!(w.state.mode(), Mode::Managed);
+}
+
+#[then("this device is registered")]
+fn device_registered(w: &mut Agent) {
+    assert!(w.state.device_id.is_some());
+    assert_eq!(w.plane().lock().unwrap().devices.len(), 1);
+}
+
+#[then("I am not signed in")]
+fn not_signed_in(w: &mut Agent) {
+    w.reload();
+    assert!(w.state.access_token.is_none());
+    assert_eq!(w.state.mode(), Mode::SignedOut);
+}
+
+#[then("OpsAPI received the password")]
+fn opsapi_got_password(w: &mut Agent) {
+    let (ops, _) = w.opsapi.as_ref().expect("opsapi");
+    assert_eq!(
+        ops.lock().unwrap().passwords_seen,
+        vec!["right".to_string()]
+    );
+}
+
+#[then("the control plane never saw the password")]
+fn plane_never_saw_password(w: &mut Agent) {
+    let bodies = w.plane().lock().unwrap().bodies.clone();
+    assert!(!bodies.is_empty(), "the exchange happened");
+    for body in bodies {
+        assert!(!body.contains("right"), "{body}");
+    }
+}
+
+#[given(expr = "I have imported a WireGuard config saved on Windows as {string}")]
+fn imported_from_windows(w: &mut Agent, name: String) {
+    let text = format!("\u{feff}{}", config_with(None).replace('\n', "\r\n"));
+    profile::import(&mut w.state, &text, &name).expect("import");
+}
+
+#[then("wg-quick brought up the config without a byte order mark or CR characters")]
+fn brought_up_clean(w: &mut Agent) {
+    let used = std::fs::read_to_string(w.dir.join("conf-at-up")).unwrap();
+    assert!(used.starts_with("[Interface]\n"), "{used:?}");
+    assert!(!used.contains('\r'), "{used:?}");
+    assert_eq!(used, config_with(None));
 }
 
 #[given(expr = "the control plane offers the network {string}")]

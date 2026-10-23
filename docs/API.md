@@ -13,7 +13,7 @@ Every route under `/api/v1` and `/SCIM/v2` requires a credential. See
 
 | Client | Mechanism | Reaches |
 |--------|-----------|---------|
-| User / agent / CLI | Bearer access token from OIDC, or `/auth/dev/login` when explicitly enabled on a loopback deployment | Their own resources |
+| User / agent / CLI | Bearer access token from OIDC, from `/auth/opsapi/exchange` (an OpsAPI session checked with OpsAPI), or `/auth/dev/login` when explicitly enabled on a loopback deployment | Their own resources |
 | Administrator | The same, with `role = 'admin'` | Everything |
 | OpsAPI | Service token, scope `ops:provision` | `/api/v1/ops/*` |
 | Identity provider | Service token, scope `scim:manage` | `/SCIM/v2/*` |

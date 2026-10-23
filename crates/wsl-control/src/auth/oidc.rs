@@ -340,7 +340,7 @@ fn random_secret() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-async fn mint_access_token(state: &AppState, user_id: Uuid) -> AppResult<(String, i64)> {
+pub(crate) async fn mint_access_token(state: &AppState, user_id: Uuid) -> AppResult<(String, i64)> {
     let access_token = random_secret();
     let expires_in = 8 * 3600i64;
     sqlx::query(

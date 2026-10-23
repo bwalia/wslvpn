@@ -62,6 +62,10 @@ pub struct AgentStatus {
     /// Every signal behind the `posture` summary, so a user can see which check
     /// is the one holding them up.
     pub posture_signals: Vec<PostureSignal>,
+    /// Tunnels the official WireGuard app has connected alongside ours. Two
+    /// tunnels competing for the same routes is the usual reason "connected"
+    /// carries no traffic, so the window says so.
+    pub other_wireguard: Vec<String>,
 }
 
 /// Reduce the signals to one line.
@@ -175,7 +179,9 @@ impl AgentState {
     /// the two is what let the agent claim it was connected when it was not.
     pub fn status(&self, tunnel: &TunnelState) -> AgentStatus {
         let signals = posture::collect();
-        self.status_with_posture(tunnel, signals)
+        let mut status = self.status_with_posture(tunnel, signals);
+        status.other_wireguard = crate::tunnel::other_wireguard_tunnels();
+        status
     }
 
     /// The same report from a given set of signals, so the summary can be
@@ -220,6 +226,7 @@ impl AgentState {
                 TunnelState::Down => None,
             },
             posture_signals,
+            other_wireguard: Vec::new(),
         }
     }
 

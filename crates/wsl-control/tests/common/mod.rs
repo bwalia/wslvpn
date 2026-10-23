@@ -61,6 +61,7 @@ pub fn test_config() -> Config {
             },
             dev_login_enabled: false,
             admission: Default::default(),
+            opsapi: None,
         },
         wireguard: WireGuardConfig {
             default_port: 51820,

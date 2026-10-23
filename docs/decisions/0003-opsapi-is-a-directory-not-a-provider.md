@@ -36,6 +36,12 @@ Two further details matter for any client written against it:
   serves well over a hundred. It is generated from the database schema and is not
   a usable contract.
 
+> **Update (2026-10-23):** signing in *with an OpsAPI account* is now
+> supported without changing this decision — WSLVPN still never holds
+> `JWT_SECRET_KEY` and never validates an OpsAPI JWT itself. It asks OpsAPI's
+> `/auth/me` and SCIM instead. See
+> [ADR-0004](0004-sign-in-with-opsapi-by-asking-opsapi.md).
+
 ## Decision
 
 **Login comes from a standards-compliant OIDC provider. OpsAPI is the directory.**

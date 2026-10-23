@@ -39,14 +39,25 @@ WSL_CLI=$PWD/../../target/debug/wsl npm run tauri dev
 
 ## Connecting
 
-The first screen offers two ways in:
+The first screen offers these ways in:
 
-- **Sign in** — enter the control plane's URL (`https`, or `http` to this
-  machine only) and sign in through its identity provider in the browser.
+- **Sign in with browser** — enter the control plane's URL (`https`, or `http`
+  to this machine only) and sign in through its identity provider.
+- **Sign in with OpsAPI** — shown only when the control plane offers it
+  (`wsl sign-in-methods`). Email and password go to OpsAPI through the CLI's
+  stdin, never its arguments; if OpsAPI emails a code, the window asks for it.
+  The control plane checks the session with OpsAPI and SCIM, and checks SCIM
+  again on every Connect.
 - **Import WireGuard config…** — pick the `.conf` your administrator issued.
   The app connects straight to that WireGuard server; no control plane is
   involved. Configs with `PostUp`/`PreUp`/`PostDown`/`PreDown` are refused,
-  because `wg-quick` would run those commands as root.
+  because `wg-quick` would run those commands as root. Files exported by the
+  official WireGuard apps import unchanged; a Windows byte order mark and CRLF
+  line endings are removed.
+
+If the official WireGuard app has a tunnel connected at the same time, the
+dashboard names it: two tunnels routing the same addresses is the usual reason
+a connection carries no traffic.
 
 Connect and Disconnect show the macOS administrator dialog: bringing an
 interface up needs root, and the app itself never has it.

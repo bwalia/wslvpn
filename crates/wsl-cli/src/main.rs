@@ -48,13 +48,33 @@ enum Commands {
         /// plane only serves it when bound to loopback.
         #[arg(long)]
         dev: bool,
-        /// Email for --dev. Ignored by SSO, which gets identity from the
-        /// provider.
-        #[arg(long, default_value = "alice@example.com")]
-        email: String,
+        /// Email for --dev and --opsapi. Ignored by browser sign-in, which
+        /// gets identity from the provider.
+        #[arg(long)]
+        email: Option<String>,
         /// Print the sign-in URL but do not open a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in with an OpsAPI account (email and password) instead of the
+        /// browser. The password goes to OpsAPI, not to the control plane.
+        #[arg(long, conflicts_with = "dev")]
+        opsapi: bool,
+        /// Finish an OpsAPI sign-in with the code OpsAPI emailed.
+        #[arg(long, requires = "opsapi")]
+        code: bool,
+        /// Read secrets from stdin rather than prompting: the password, or
+        /// with --code the challenge and then the code, one per line. Secrets
+        /// never go on the command line, where `ps` would show them.
+        #[arg(long)]
+        stdin: bool,
+        /// Report the outcome as JSON (with --opsapi).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show which ways of signing in the control plane offers.
+    SignInMethods {
+        #[arg(long)]
+        json: bool,
     },
     /// Sign out and forget the session.
     Logout,
@@ -225,11 +245,96 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login {
+            opsapi: true,
+            email,
+            code,
+            stdin,
+            json,
+            ..
+        } => {
+            let signed_in = if code {
+                let challenge = read_secret_line(stdin, "Challenge: ")?;
+                let code = read_secret_line(stdin, "Code from the email: ")?;
+                client
+                    .opsapi_verify_code(&mut state, &challenge, &code)
+                    .await?;
+                true
+            } else {
+                let email = match email {
+                    Some(e) => e,
+                    None if !stdin => prompt_line("Email: ")?,
+                    None => anyhow::bail!("--email is required with --stdin"),
+                };
+                let password = read_password(stdin)?;
+                match client.opsapi_login(&mut state, &email, &password).await? {
+                    None => true,
+                    Some(step) if json => {
+                        // The app holds the challenge and calls back with the code.
+                        println!("{}", serde_json::to_string(&step)?);
+                        false
+                    }
+                    Some(wsl_agent::opsapi::Step::CodeRequired { challenge, email }) if !stdin => {
+                        eprintln!("A sign-in code was sent to {email}.");
+                        let code = prompt_line("Code: ")?;
+                        client
+                            .opsapi_verify_code(&mut state, &challenge, &code)
+                            .await?;
+                        true
+                    }
+                    Some(_) => anyhow::bail!(
+                        "OpsAPI sent a sign-in code; run again with --json to receive the challenge"
+                    ),
+                }
+            };
+            if signed_in {
+                client.ensure_device(&mut state).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "signed_in",
+                            "email": state.email,
+                            "device": state.device_name,
+                        })
+                    );
+                } else {
+                    println!(
+                        "Signed in as {}",
+                        state.email.as_deref().unwrap_or("(unknown)")
+                    );
+                    println!(
+                        "Device registered: {}",
+                        state.device_name.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+        }
+        Commands::SignInMethods { json } => {
+            let methods = client.sign_in_methods(&state).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&methods)?);
+            } else {
+                println!(
+                    "Browser sign-in: {}",
+                    if methods.oidc { "yes" } else { "no" }
+                );
+                match methods.opsapi {
+                    Some(o) => println!(
+                        "OpsAPI sign-in:  yes ({}, workspace {})",
+                        o.url, o.namespace
+                    ),
+                    None => println!("OpsAPI sign-in:  no"),
+                }
+            }
+        }
+        Commands::Login {
             dev,
             email,
             no_browser,
+            ..
         } => {
             if dev {
+                let email = email.unwrap_or_else(|| "alice@example.com".into());
                 client.dev_login(&mut state, &email).await?;
             } else {
                 client.login(&mut state, !no_browser).await?;
@@ -379,6 +484,62 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One line from stdin, without its newline.
+fn stdin_line() -> anyhow::Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading stdin")?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn prompt_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+    Ok(stdin_line()?.trim().to_string())
+}
+
+fn read_secret_line(from_stdin: bool, prompt: &str) -> anyhow::Result<String> {
+    let line = if from_stdin {
+        stdin_line()?
+    } else {
+        prompt_line(prompt)?
+    };
+    if line.trim().is_empty() {
+        anyhow::bail!("{} was empty", prompt.trim_end_matches([':', ' ']));
+    }
+    Ok(line.trim().to_string())
+}
+
+/// The password, from stdin or a terminal prompt that does not echo it.
+fn read_password(from_stdin: bool) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    if from_stdin || !std::io::stdin().is_terminal() {
+        let line = stdin_line()?;
+        if line.is_empty() {
+            anyhow::bail!("no password on stdin");
+        }
+        return Ok(line);
+    }
+    let stty = |arg: &str| {
+        std::process::Command::new("stty")
+            .arg(arg)
+            .stdin(std::process::Stdio::inherit())
+            .status()
+    };
+    eprint!("Password: ");
+    let _ = stty("-echo");
+    let line = stdin_line();
+    let _ = stty("echo");
+    eprintln!();
+    let line = line?;
+    if line.is_empty() {
+        anyhow::bail!("no password entered");
+    }
+    Ok(line)
+}
+
 fn print_status(state: &AgentState, json: bool) -> anyhow::Result<()> {
     let status = state.status(&wsl_agent::tunnel::state());
     if json {
@@ -426,6 +587,14 @@ fn print_status(state: &AgentState, json: bool) -> anyhow::Result<()> {
         for n in &status.networks {
             println!("  {:<16} {}", n.name, n.state);
         }
+    }
+    if !status.other_wireguard.is_empty() {
+        println!();
+        println!(
+            "Warning: the WireGuard app also has {} connected; two tunnels \
+             competing for the same routes can leave this one carrying no traffic.",
+            status.other_wireguard.join(", ")
+        );
     }
     if let Some(exp) = &status.session_expires {
         println!();

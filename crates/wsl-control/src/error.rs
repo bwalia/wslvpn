@@ -16,6 +16,13 @@ pub enum AppError {
     Forbidden,
     #[error("not found")]
     NotFound,
+    #[error("{0}")]
+    Conflict(String),
+    /// A dependency this decision needs could not be asked. Distinct from a
+    /// refusal so a client can say "try again" rather than "you are not
+    /// allowed" — and never treated as an allow.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
     #[error(transparent)]
@@ -39,6 +46,11 @@ impl IntoResponse for AppError {
             ),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "forbidden".into()),
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".into()),
+            AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
+            AppError::Unavailable(m) => {
+                tracing::error!(error = %m, "dependency unavailable");
+                (StatusCode::SERVICE_UNAVAILABLE, "unavailable", m.clone())
+            }
             AppError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");
                 (

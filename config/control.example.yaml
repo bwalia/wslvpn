@@ -45,6 +45,15 @@ identity:
     # can sign in, which is the right default for a deployment without one.
     native_schemes:
       - io.wsl.zerotrust
+  # Signing in with an OpsAPI account. The app sends the password to OpsAPI;
+  # the control plane checks the resulting session with OpsAPI's /auth/me and
+  # the person's record over SCIM, and checks SCIM again on every connect.
+  # See docs/OPSAPI.md and ADR-0004.
+  # opsapi:
+  #   url: "https://api.example.com"
+  #   namespace: "workstation"          # workspace people must belong to
+  #   api_key: "${WSL_OPSAPI_API_KEY}"  # opsk_ key of a platform administrator
+  #   verify_on_connect: true
 
 wireguard:
   default_port: 51820

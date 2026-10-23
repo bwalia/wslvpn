@@ -578,9 +578,62 @@ fn interface_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Tunnels the official WireGuard app has connected right now.
+///
+/// The WireGuard app runs its tunnels as macOS network extensions, which our
+/// `wg-quick` interface knows nothing about. Two tunnels that both claim the
+/// default route — or the same private range — leave traffic going wherever
+/// the routing table last pointed, which looks to a user like "connected but
+/// nothing works". Naming the other tunnel is the useful thing to do; stopping
+/// it is the user's call, so this only reports.
+pub fn other_wireguard_tunnels() -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    std::process::Command::new("/usr/sbin/scutil")
+        .args(["--nc", "list"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|out| parse_nc_list(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
+}
+
+/// The names of connected WireGuard-app services in `scutil --nc list`.
+///
+/// A line looks like
+/// `* (Connected)  <UUID> VPN (com.wireguard.macos) "office"  [VPN/com.wireguard.macos]`;
+/// older releases print the name unquoted.
+pub fn parse_nc_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.contains("(Connected)") && line.contains("com.wireguard."))
+        .filter_map(|line| {
+            let after = line.split_once("com.wireguard.")?.1;
+            let after = after.split_once(')')?.1;
+            let name = after.split('[').next()?.trim();
+            let name = name.trim_matches('"').trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connected_wireguard_app_tunnels_are_named_and_others_ignored() {
+        let out = "Available network connection services in the current set (*=enabled):\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000001 VPN (com.wireguard.macos) \"office\"                     [VPN/com.wireguard.macos]\n\
+            * (Disconnected)   6B2A1C3D-0000-4000-8000-000000000002 VPN (com.wireguard.macos) \"home\"                       [VPN/com.wireguard.macos]\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000003 VPN (com.cisco.anyconnect) \"Corp\"                      [VPN/com.cisco.anyconnect]\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000004 VPN (com.wireguard.macos) lab                            [VPN/com.wireguard.macos]\n";
+        assert_eq!(parse_nc_list(out), vec!["office", "lab"]);
+        assert!(parse_nc_list(
+            "Available network connection services in the current set (*=enabled):\n"
+        )
+        .is_empty());
+    }
 
     fn wg(bash: Option<&str>) -> WgQuick {
         WgQuick {

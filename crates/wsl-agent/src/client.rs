@@ -8,6 +8,7 @@ use wsl_types::{
 };
 
 use crate::oidc;
+use crate::opsapi;
 use crate::posture;
 use crate::state::AgentState;
 use crate::tunnel::{self, Escalation, TunnelState};
@@ -35,6 +36,54 @@ impl ControlClient {
         state.email = Some(token.email);
         state.save()?;
         Ok(())
+    }
+
+    /// Sign in with an OpsAPI account: `password` goes to OpsAPI, never to the
+    /// control plane. Returns a code request when OpsAPI emails one; finish
+    /// with [`Self::opsapi_verify_code`].
+    pub async fn opsapi_login(
+        &self,
+        state: &mut AgentState,
+        email: &str,
+        password: &str,
+    ) -> Result<Option<opsapi::Step>> {
+        oidc::check_control_plane(&self.http, &state.control_url).await?;
+        let url = opsapi::opsapi_url(&self.http, &state.control_url).await?;
+        match opsapi::begin(&self.http, &url, email, password).await? {
+            opsapi::Step::Token(token) => {
+                self.adopt_opsapi_token(state, &token).await?;
+                Ok(None)
+            }
+            step => Ok(Some(step)),
+        }
+    }
+
+    /// The second half of [`Self::opsapi_login`], with the emailed code.
+    pub async fn opsapi_verify_code(
+        &self,
+        state: &mut AgentState,
+        challenge: &str,
+        code: &str,
+    ) -> Result<()> {
+        let url = opsapi::opsapi_url(&self.http, &state.control_url).await?;
+        let token = opsapi::verify_code(&self.http, &url, challenge, code).await?;
+        self.adopt_opsapi_token(state, &token).await
+    }
+
+    /// Trade the OpsAPI token for a WSL one. The OpsAPI token is dropped here
+    /// and never saved.
+    async fn adopt_opsapi_token(&self, state: &mut AgentState, token: &str) -> Result<()> {
+        let issued = opsapi::exchange(&self.http, &state.control_url, token).await?;
+        state.access_token = Some(issued.access_token);
+        state.user_id = Some(issued.user_id);
+        state.email = Some(issued.email);
+        state.save()?;
+        Ok(())
+    }
+
+    /// Which sign-in methods the configured control plane offers.
+    pub async fn sign_in_methods(&self, state: &AgentState) -> Result<opsapi::SignInMethods> {
+        opsapi::methods(&self.http, &state.control_url).await
     }
 
     pub async fn dev_login(&self, state: &mut AgentState, email: &str) -> Result<()> {
@@ -139,7 +188,7 @@ impl ControlClient {
             device_id,
             posture: posture::collect(),
         };
-        let resp: CreateSessionResponse = self
+        let response = self
             .http
             .post(format!(
                 "{}/api/v1/sessions",
@@ -148,11 +197,20 @@ impl ControlClient {
             .headers(auth_headers(state)?)
             .json(&req)
             .send()
-            .await?
-            .error_for_status()
-            .context("create session")?
-            .json()
             .await?;
+        let resp: CreateSessionResponse = match response.status().as_u16() {
+            200..=299 => response.json().await?,
+            403 => anyhow::bail!(
+                "create session: access was refused. Your account, this device's posture, or \
+                 the network's policy does not allow it; if you were recently removed from \
+                 the directory, this is why"
+            ),
+            503 => anyhow::bail!(
+                "create session: the control plane could not check your account with the \
+                 directory just now; try again shortly"
+            ),
+            _ => return Err(response.error_for_status().unwrap_err()).context("create session"),
+        };
         state.session = Some(resp.session.clone());
         state.wireguard = Some(resp.wireguard.clone());
         state.network_name = Some(network.name.clone());

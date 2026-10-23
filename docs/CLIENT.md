@@ -102,6 +102,33 @@ Three properties come out of that shape:
   process. A local process that watches the loopback request gains nothing. A
   wrong verifier burns the code rather than allowing another attempt.
 
+## Signing in with an OpsAPI account
+
+When the control plane offers it (`wsl sign-in-methods`), you can sign in with
+your OpsAPI email and password instead of the browser:
+
+```bash
+wsl login --opsapi --email alice@example.com
+```
+
+The password is prompted for without echo and sent to OpsAPI — the address
+the control plane advertises, which must be https (or this machine) — never to
+the control plane. If your workspace requires a sign-in code, OpsAPI emails one
+and `login` asks for it. The control plane then checks the OpsAPI session with
+OpsAPI and the directory, and issues its own token; the OpsAPI token is not
+saved. Every `connect` is checked against the directory again. See
+[OPSAPI.md](OPSAPI.md#signing-in-with-an-opsapi-account).
+
+For a program driving the CLI (the desktop app does this), secrets go on stdin
+and never on the command line, where `ps` would show them:
+
+```bash
+printf '%s\n' "$PASSWORD" | wsl login --opsapi --email alice@example.com --stdin --json
+# {"status":"code_required","challenge":"…","email":"alice@example.com"}
+printf '%s\n%s\n' "$CHALLENGE" "$CODE" | wsl login --opsapi --code --stdin --json
+# {"status":"signed_in","email":"alice@example.com","device":"…"}
+```
+
 ## Machine-readable output
 
 `wsl status --json` and `wsl networks --json` emit the same data the human
@@ -135,6 +162,24 @@ runs it as root:
 
 The config is stored mode 0600 and its private key is never copied into agent
 state.
+
+### Configs from the official WireGuard apps
+
+A `.conf` exported by the WireGuard apps (macOS, iOS, Windows, Android) or by
+servers such as wg-easy and PiVPN imports as it is: `ListenPort`, `MTU`,
+`PresharedKey`, full-tunnel `AllowedIPs = 0.0.0.0/0, ::/0`, DNS search domains,
+IPv6 endpoints, and extra peers without an `Endpoint` are all accepted. Files
+saved on Windows carry a UTF-8 byte order mark and CRLF line endings; both are
+removed before the file is validated and stored, because `wg-quick` would
+otherwise read the BOM as part of `[Interface]` and ignore every key under it.
+
+Hooks are refused here as they are by the macOS and iOS WireGuard apps.
+
+The official WireGuard app runs its tunnels as macOS network extensions,
+alongside the `wsl` interface rather than through it. `wsl status` (and the
+desktop window) names any tunnel the WireGuard app has connected, because two
+tunnels claiming the same routes is the usual cause of "connected, but nothing
+loads". Disconnect one of them.
 
 ## Choosing the control plane
 

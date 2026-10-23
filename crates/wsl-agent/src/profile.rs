@@ -77,8 +77,25 @@ fn is_key(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The config as wg-quick should read it.
+///
+/// WireGuard for Windows and Notepad save UTF-8 with a byte order mark, which
+/// wg-quick takes as part of `[Interface]` and then ignores every key under
+/// it. Configs that went through Windows also arrive with CRLF line endings.
+/// Neither is a reason to refuse a file the official apps accept, so both are
+/// removed here, before validation and before the file is stored.
+pub fn normalise(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out: String = text.lines().map(|l| format!("{l}\n")).collect();
+    if out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// Check a wg-quick config and say what it connects to.
 pub fn validate(text: &str, name: &str) -> Result<DirectProfile> {
+    let text = &normalise(text);
     let mut section = Section::None;
     let mut interfaces = 0;
     let mut peers = 0;
@@ -221,8 +238,9 @@ pub fn name_from_path(path: &Path) -> String {
 
 /// Validate, store privately, and record the profile in agent state.
 pub fn import(state: &mut AgentState, text: &str, name: &str) -> Result<DirectProfile> {
-    let profile = validate(text, name)?;
-    write_private_file(&profile_conf_path()?, text)?;
+    let text = normalise(text);
+    let profile = validate(&text, name)?;
+    write_private_file(&profile_conf_path()?, &text)?;
     state.profile = Some(profile.clone());
     state.save()?;
     Ok(profile)
@@ -386,6 +404,50 @@ mod tests {
             good().replace("DNS = 10.8.0.1", "DNS = 10.8.0.1 # office")
         );
         assert_eq!(validate(&text, "x").unwrap().dns, vec!["10.8.0.1"]);
+    }
+
+    /// Windows' WireGuard app and Notepad save UTF-8 with a byte order mark.
+    /// It is invisible in every editor and must not cost the first line.
+    #[test]
+    fn a_byte_order_mark_is_not_part_of_the_first_line() {
+        let text = format!("\u{feff}{}", good().replace('\n', "\r\n"));
+        let p = validate(&text, "office").unwrap();
+        assert_eq!(p.endpoint, "vpn.example.com:51820");
+        assert_eq!(p.dns, vec!["10.8.0.1"]);
+    }
+
+    /// What is stored is what wg-quick reads, so it is stored the way
+    /// wg-quick reads best: no BOM, LF line endings, a final newline.
+    #[test]
+    fn the_stored_config_is_normalised_for_wg_quick() {
+        let text = format!("\u{feff}{}", good().trim_end().replace('\n', "\r\n"));
+        let stored = normalise(&text);
+        assert!(stored.starts_with("[Interface]\n"), "{stored:?}");
+        assert!(!stored.contains('\r'));
+        assert!(stored.ends_with('\n'));
+        assert_eq!(
+            validate(&stored, "x").unwrap(),
+            validate(&text, "x").unwrap()
+        );
+    }
+
+    /// A config as the official WireGuard apps and common servers (wg-easy,
+    /// PiVPN) export it: ListenPort, MTU, a preshared key, full-tunnel routes,
+    /// a DNS search domain, and a second peer that is reached through the
+    /// first and so has no endpoint of its own.
+    #[test]
+    fn a_config_exported_by_the_wireguard_app_is_accepted() {
+        let text = format!(
+            "[Interface]\nPrivateKey = {KEY}\nListenPort = 51820\nAddress = 10.8.0.2/24\n\
+             DNS = 10.8.0.1, corp.example\nMTU = 1420\n\n\
+             [Peer]\nPublicKey = {PUB}\nPresharedKey = {KEY}\nAllowedIPs = 0.0.0.0/0, ::/0\n\
+             Endpoint = [2001:db8::1]:51820\nPersistentKeepalive = 0\n\n\
+             [Peer]\nPublicKey = {KEY}\nAllowedIPs = 10.20.0.0/16\n"
+        );
+        let p = validate(&text, "home").unwrap();
+        assert_eq!(p.endpoint, "[2001:db8::1]:51820");
+        assert_eq!(p.dns, vec!["10.8.0.1", "corp.example"]);
+        assert_eq!(p.allowed_ips, vec!["0.0.0.0/0", "::/0", "10.20.0.0/16"]);
     }
 
     #[test]

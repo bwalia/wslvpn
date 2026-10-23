@@ -145,6 +145,17 @@ config:
   admission:
     provisioning: directory
     hostedDomains: []
+  # Signing in with an OpsAPI account (email, password, emailed code). The
+  # control plane asks OpsAPI's /auth/me whose session it is, then confirms the
+  # person over SCIM, and asks SCIM again on every connect. Needs
+  # WSL_OPSAPI_API_KEY — an opsk_ key of an OpsAPI platform administrator — in
+  # secrets.existingSecret. See docs/OPSAPI.md and ADR-0004.
+  opsapi:
+    enabled: false
+    url: ""
+    # The workspace (namespace slug) people must be active members of.
+    namespace: ""
+    verifyOnConnect: true
   wireguard:
     defaultPort: 51820
   gitops:

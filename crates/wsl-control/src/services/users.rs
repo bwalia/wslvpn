@@ -1,4 +1,4 @@
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -61,6 +61,13 @@ impl UserService {
         ))
     }
 
+    /// Create a user — or, when one with this email exists and has no
+    /// `external_id` yet, give it the one supplied.
+    ///
+    /// The second case is a directory (OpsAPI, SCIM) claiming an account that
+    /// predates it, such as a bootstrap administrator. Only the directory's
+    /// own credential reaches this, which is what makes it a statement about
+    /// who the person is; an email match at sign-in never links (ADR-0004).
     pub async fn create(&self, req: CreateUserRequest) -> AppResult<User> {
         let row: (
             Uuid,
@@ -75,6 +82,10 @@ impl UserService {
             r#"
                 INSERT INTO users (email, display_name, external_id, active)
                 VALUES ($1, $2, $3, $4)
+                ON CONFLICT (email) DO UPDATE
+                  SET external_id = EXCLUDED.external_id, updated_at = NOW()
+                  WHERE EXCLUDED.external_id IS NOT NULL
+                    AND (users.external_id IS NULL OR users.external_id = EXCLUDED.external_id)
                 RETURNING id, email, display_name, external_id, active, role, created_at, updated_at
                 "#,
         )
@@ -82,8 +93,19 @@ impl UserService {
         .bind(&req.display_name)
         .bind(&req.external_id)
         .bind(req.active)
-        .fetch_one(&self.state.db)
-        .await?;
+        .fetch_optional(&self.state.db)
+        .await
+        .map_err(|e| match &e {
+            // The external id already belongs to someone else.
+            sqlx::Error::Database(db) if db.is_unique_violation() => {
+                AppError::Conflict("that external_id already belongs to another user".into())
+            }
+            _ => AppError::from(e),
+        })?
+        // The email exists and either no external id was given, or it already
+        // carries a different one. Re-pointing an account at another directory
+        // identity is never done silently.
+        .ok_or_else(|| AppError::Conflict("a user with that email already exists".into()))?;
         Ok(User {
             id: row.0,
             email: row.1,

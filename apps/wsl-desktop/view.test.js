@@ -11,6 +11,10 @@ import {
   validateOverride,
   controlUrlProblem,
   profileNameFromFile,
+  signInOptions,
+  opsapiProblem,
+  afterOpsapiSignIn,
+  otherVpnWarning,
 } from "./view.js";
 
 const signedOut = {
@@ -190,4 +194,70 @@ test("a profile is named after its file", () => {
   assert.equal(profileNameFromFile("office.conf"), "office");
   assert.equal(profileNameFromFile("wg0"), "wg0");
   assert.equal(profileNameFromFile(".conf"), "WireGuard");
+});
+
+// --- Signing in with OpsAPI ------------------------------------------------
+
+test("the OpsAPI form appears only when the control plane offers it", () => {
+  assert.deepEqual(signInOptions({ oidc: true, opsapi: null }), {
+    browser: true,
+    opsapi: null,
+  });
+  const offered = signInOptions({
+    oidc: true,
+    opsapi: { url: "https://api.example.com", namespace: "workstation" },
+  });
+  assert.equal(offered.browser, true);
+  assert.equal(offered.opsapi.label, "Sign in with OpsAPI");
+  assert.match(offered.opsapi.hint, /workstation/);
+  assert.match(offered.opsapi.hint, /api\.example\.com/);
+});
+
+test("methods that could not be read still leave browser sign-in", () => {
+  assert.deepEqual(signInOptions(null), { browser: true, opsapi: null });
+});
+
+test("email and password are checked before anything is sent", () => {
+  assert.match(opsapiProblem("", "pw"), /email/i);
+  assert.match(opsapiProblem("not-an-email", "pw"), /email/i);
+  assert.match(opsapiProblem("alice@example.com", ""), /password/i);
+  assert.equal(opsapiProblem(" alice@example.com ", "pw"), null);
+});
+
+test("an emailed code moves the form to the code step", () => {
+  const next = afterOpsapiSignIn({
+    status: "code_required",
+    challenge: "abc",
+    email: "alice@example.com",
+  });
+  assert.deepEqual(next, {
+    step: "code",
+    challenge: "abc",
+    prompt: "Enter the code sent to alice@example.com",
+  });
+});
+
+test("a finished sign-in goes back to reading status", () => {
+  assert.deepEqual(
+    afterOpsapiSignIn({ status: "signed_in", email: "bob@example.com" }),
+    { step: "done" },
+  );
+});
+
+// --- The official WireGuard app ------------------------------------------
+
+test("a tunnel in the WireGuard app is named, because it competes for routes", () => {
+  assert.equal(otherVpnWarning({ other_wireguard: [] }), null);
+  assert.equal(otherVpnWarning({}), null);
+  const one = otherVpnWarning({ other_wireguard: ["office"] });
+  assert.match(one, /WireGuard app/);
+  assert.match(one, /“office”/);
+  const two = otherVpnWarning({ other_wireguard: ["office", "home"] });
+  assert.match(two, /“office” and “home”/);
+});
+
+test("the dashboard carries the warning", () => {
+  const view = dashboard({ ...direct(true), other_wireguard: ["home"] });
+  assert.match(view.warning, /“home”/);
+  assert.equal(dashboard(direct(true)).warning, null);
 });

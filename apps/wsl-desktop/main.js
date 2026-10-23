@@ -11,6 +11,9 @@ import {
   validateOverride,
   controlUrlProblem,
   profileNameFromFile,
+  signInOptions,
+  opsapiProblem,
+  afterOpsapiSignIn,
 } from "./view.js";
 
 const POLL_INTERVAL_MS = 5000;
@@ -26,6 +29,12 @@ const panels = {
 let polling = null;
 let busy = false;
 let lastStatus = null;
+// The control plane whose sign-in methods are on screen, so polling does not
+// re-ask on every tick.
+let methodsFor = null;
+// An OpsAPI sign-in waiting for its emailed code. Held only in memory, and
+// only between the two CLI calls.
+let pendingChallenge = null;
 
 async function invoke(command, args = {}) {
   if (!window.__TAURI_INTERNALS__) {
@@ -143,6 +152,29 @@ function renderPosture(signals) {
   );
 }
 
+async function loadMethods(url) {
+  if (!url || url === methodsFor) return;
+  methodsFor = url;
+  let methods = null;
+  try {
+    methods = await invoke("sign_in_methods");
+  } catch {
+    // An unreachable control plane still gets the browser button; signing in
+    // will say what is wrong with the address.
+  }
+  const options = signInOptions(methods);
+  el("sign-in").hidden = !options.browser;
+  el("opsapi-hint").textContent = options.opsapi?.hint ?? "";
+  el("opsapi-form").hidden = !options.opsapi || Boolean(pendingChallenge);
+}
+
+function showCodeStep(prompt) {
+  el("code-prompt").textContent = prompt ?? "";
+  el("code-form").hidden = !pendingChallenge;
+  el("opsapi-form").hidden = Boolean(pendingChallenge) || !el("opsapi-hint").textContent;
+  if (pendingChallenge) el("opsapi-code").focus();
+}
+
 function render(status) {
   lastStatus = status;
   if (panelFor(status) === "signedOut") {
@@ -150,14 +182,19 @@ function render(status) {
     const input = el("control-url");
     // Do not overwrite what the person is typing.
     if (document.activeElement !== input) input.value = status.control_url ?? "";
+    void loadMethods(status.control_url);
     return;
   }
+  pendingChallenge = null;
+  el("code-form").hidden = true;
 
   show("dashboard");
   const view = dashboard(status);
   for (const [id, fact] of Object.entries(view.facts)) applyFact(id, fact);
   el("dot").classList.toggle("down", !view.connected);
   el("tunnel-state").textContent = view.stateText;
+  el("other-vpn").hidden = !view.warning;
+  el("other-vpn").textContent = view.warning ?? "";
   el("connect").hidden = !view.showConnect;
   el("disconnect").hidden = !view.showDisconnect;
   el("leave").textContent = view.leave.label;
@@ -283,6 +320,71 @@ el("sign-in-form").addEventListener("submit", async (event) => {
     return invoke("sign_in");
   });
   el("sign-in-hint").hidden = true;
+});
+
+// A new control plane may offer different ways in.
+el("control-url").addEventListener("change", async () => {
+  const url = el("control-url").value.trim();
+  if (controlUrlProblem(url) || url === lastStatus?.control_url) return;
+  try {
+    render(await invoke("set_control_url", { url }));
+    setError("signed-out-error", null);
+  } catch (error) {
+    setError("signed-out-error", error);
+  }
+});
+
+el("opsapi-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = el("opsapi-email").value.trim();
+  const password = el("opsapi-password").value;
+  const problem = opsapiProblem(email, password);
+  if (problem) {
+    setError("signed-out-error", problem);
+    return;
+  }
+  await act(
+    el("opsapi-submit"),
+    "signed-out-error",
+    () => invoke("opsapi_sign_in", { email, password }),
+    (result) => {
+      const next = afterOpsapiSignIn(result);
+      if (next.step === "code") {
+        pendingChallenge = next.challenge;
+        showCodeStep(next.prompt);
+      }
+    },
+  );
+  // Never left in the field once it has been used, right or wrong.
+  el("opsapi-password").value = "";
+  void refresh();
+});
+
+el("code-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const code = el("opsapi-code").value.trim();
+  if (!code) {
+    setError("signed-out-error", "Enter the code from the email");
+    return;
+  }
+  const ok = await act(
+    el("code-submit"),
+    "signed-out-error",
+    () => invoke("opsapi_verify_code", { challenge: pendingChallenge, code }),
+    () => {
+      pendingChallenge = null;
+      showCodeStep();
+    },
+  );
+  el("opsapi-code").value = "";
+  if (ok) void refresh();
+});
+
+el("code-cancel").addEventListener("click", () => {
+  pendingChallenge = null;
+  el("opsapi-code").value = "";
+  setError("signed-out-error", null);
+  showCodeStep();
 });
 
 el("import-file").addEventListener("change", async (event) => {

@@ -1,3 +1,4 @@
+use crate::auth::opsapi;
 use crate::auth::service_token::OpsAuth;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
@@ -31,6 +32,27 @@ pub async fn create(
     user: AuthUser,
     Json(body): Json<CreateSessionRequest>,
 ) -> AppResult<Json<CreateSessionResponse>> {
+    // Before any policy is evaluated: someone the directory has since
+    // deprovisioned does not get a session, whatever their token says.
+    if let Err(err) = opsapi::verify_on_connect(&state, user.user_id).await {
+        if matches!(err, AppError::Forbidden) {
+            AuditService::new(state.clone())
+                .record(
+                    AuditEntry::new("session.create")
+                        .decision("deny")
+                        .by_user(user.user_id, &user.email)
+                        // In the details, not as the device reference: this
+                        // runs before ownership is checked, so the id is only
+                        // what the client claimed.
+                        .details(serde_json::json!({
+                            "reason": "opsapi: user not active in directory",
+                            "device_id": body.device_id,
+                        })),
+                )
+                .await?;
+        }
+        return Err(err);
+    }
     Ok(Json(
         SessionService::new(state)
             .create(user.user_id, &user.email, body)

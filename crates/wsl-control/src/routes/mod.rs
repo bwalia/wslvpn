@@ -12,7 +12,7 @@ pub mod scim;
 pub mod sessions;
 pub mod users;
 
-use crate::auth::oidc;
+use crate::auth::{oidc, opsapi};
 use crate::middleware::rate_limit::{rate_limit, RateLimiter};
 use crate::middleware::shutdown;
 use crate::openapi::ApiDoc;
@@ -81,6 +81,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/oidc/callback", get(oidc::callback))
         .route("/auth/oidc/exchange", post(oidc::exchange))
         .route("/auth/dev/login", post(oidc::dev_login))
+        .route("/auth/methods", get(opsapi::methods))
+        .route("/auth/opsapi/exchange", post(opsapi::exchange))
         .route_layer(axum::middleware::from_fn_with_state(
             auth_limiter,
             rate_limit,

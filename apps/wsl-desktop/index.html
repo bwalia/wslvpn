@@ -28,11 +28,41 @@
             <input id="control-url" type="url" required spellcheck="false"
                    autocomplete="url" placeholder="https://vpn.example.com" />
           </label>
-          <button id="sign-in" type="submit">Sign in</button>
+          <button id="sign-in" type="submit">Sign in with browser</button>
         </form>
         <p class="hint" id="sign-in-hint" hidden>
           A browser window is open. Finish signing in there.
         </p>
+
+        <!-- Shown only when the control plane offers it. The password goes to
+             OpsAPI through the CLI's stdin; the control plane never sees it. -->
+        <form id="opsapi-form" class="stack" hidden>
+          <p class="hint" id="opsapi-hint"></p>
+          <label class="field">
+            <span>Email</span>
+            <input id="opsapi-email" type="email" spellcheck="false"
+                   autocomplete="username" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="opsapi-password" type="password"
+                   autocomplete="current-password" />
+          </label>
+          <button id="opsapi-submit" type="submit" class="secondary">
+            Sign in with OpsAPI
+          </button>
+        </form>
+
+        <form id="code-form" class="stack" hidden autocomplete="off">
+          <p class="hint" id="code-prompt"></p>
+          <label class="field">
+            <span>Code</span>
+            <input id="opsapi-code" inputmode="numeric" spellcheck="false"
+                   autocomplete="one-time-code" />
+          </label>
+          <button id="code-submit" type="submit">Verify</button>
+          <button id="code-cancel" type="button" class="quiet">Start again</button>
+        </form>
 
         <div class="divider"><span>or</span></div>
 
@@ -75,6 +105,8 @@
           <dt id="expires-label" hidden>Session expires</dt>
           <dd id="expires" hidden>—</dd>
         </dl>
+
+        <p class="warn" id="other-vpn" role="status" hidden></p>
 
         <div class="actions">
           <label class="field" id="network-field" hidden>
