@@ -48,7 +48,9 @@ jobs:
             target: aarch64-apple-darwin
             bundles: app,dmg
             label: macos-arm64
-          - os: macos-13
+          # Built on Apple silicon: the Intel runner images are being retired
+          # and a job asking for one waits in the queue indefinitely.
+          - os: macos-latest
             target: x86_64-apple-darwin
             bundles: app,dmg
             label: macos-x64
