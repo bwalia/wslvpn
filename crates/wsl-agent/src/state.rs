@@ -432,9 +432,11 @@ mod tests {
             data_dir_from(Some("".into()), home.clone()).unwrap(),
             PathBuf::from("/Users/a/Library/Application Support/wsl-zerotrust")
         );
+        // Absolute on this platform: `/tmp/x` is not, on Windows.
+        let absolute = std::env::temp_dir().join("x");
         assert_eq!(
-            data_dir_from(Some("/tmp/x".into()), home.clone()).unwrap(),
-            PathBuf::from("/tmp/x")
+            data_dir_from(Some(absolute.clone().into()), home.clone()).unwrap(),
+            absolute
         );
         assert!(data_dir_from(Some("relative".into()), home).is_err());
         assert!(data_dir_from(None, None).is_err());
