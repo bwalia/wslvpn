@@ -429,7 +429,7 @@ pub async fn up_with_hint(conf: &Path, escalation: Escalation, hint: &str) -> Re
                  not running. Open the WireGuard app for its log."
             );
         }
-        return Ok(state);
+        Ok(state)
     }
     #[cfg(not(windows))]
     {
