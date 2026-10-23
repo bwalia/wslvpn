@@ -92,17 +92,23 @@ asks macOS for the privilege through its own authorization dialog. Only
 
 ## What it shows
 
-| Field | Source |
-| --- | --- |
-| Profile, Control plane | `wsl status --json` (`mode`, `profile`, `control_url`) |
-| Signed in as, Device, Identity, Posture | `wsl status --json` |
-| DNS overrides | `wsl dns status --json` |
-| Interface | the `utun` the OS reports, or "Down" |
-| Networks | one row per network, with the agent's own state string |
-| Gateway, Session expires | shown only when there is a session |
+The window is laid out like the WireGuard app's "Manage Tunnels": every
+imported tunnel on the left, with a dot that is green only while its interface
+is up; the selected one on the right — interface, status, public key,
+addresses, DNS, MTU, and each peer with its endpoint, allowed IPs and
+keepalive — with **Activate** / **Deactivate** and **Edit**.
 
-A session record and a live interface are separate things, so the UI keeps them
-separate: `Session open, tunnel down` is a state a user needs to see, not a
-rounding error. The status dot pulses only when an interface is actually up.
+- **+** imports one or more `.conf` files; **−** removes the selected tunnel
+  (after asking; the tunnel that is up cannot be removed).
+- One tunnel is up at a time. Activating another replaces it in a single
+  administrator prompt.
+- **Edit** opens the config text, private key included, and saves it through
+  the same validation as an import. Renaming is done here too.
+- **Organisation sign-in**, **DNS overrides** and **Device posture** are their
+  own entries below the tunnel list.
+
+Everything shown comes from `wsl status --json` (`profiles`, `profile`,
+`interface`), so the window cannot disagree with `wsl profile list` and
+`wsl status` in a terminal.
 
 State refreshes every five seconds, and after every action.

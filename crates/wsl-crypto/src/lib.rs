@@ -6,4 +6,4 @@ pub mod wireguard;
 
 pub use keystore::{FileKeyStore, SecureKeyStore};
 pub use pkce::Pkce;
-pub use wireguard::{generate_wireguard_keypair, WireGuardKeypair};
+pub use wireguard::{generate_wireguard_keypair, public_key_from_private, WireGuardKeypair};

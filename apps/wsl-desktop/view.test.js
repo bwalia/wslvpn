@@ -15,6 +15,9 @@ import {
   opsapiProblem,
   afterOpsapiSignIn,
   otherVpnWarning,
+  tunnelList,
+  tunnelDetail,
+  chooseSelection,
 } from "./view.js";
 
 const signedOut = {
@@ -260,4 +263,97 @@ test("the dashboard carries the warning", () => {
   const view = dashboard({ ...direct(true), other_wireguard: ["home"] });
   assert.match(view.warning, /“home”/);
   assert.equal(dashboard(direct(true)).warning, null);
+});
+
+// --- The tunnel list and detail pane (as the WireGuard app shows them) -----
+
+const workstation = {
+  name: "Workstation VPN",
+  endpoint: "vpnhh.workstation.co.uk:51820",
+  address: ["10.8.0.18/32"],
+  dns: [],
+  allowed_ips: ["10.8.0.0/24", "192.168.1.0/24"],
+  public_key: "Zt7XaS0Qo85y6nSRreRkxTnWAXICyYxfXtfhJJXO6Xk=",
+  mtu: "1280",
+  listen_port: null,
+  peers: [{
+    public_key: "T7/CN8IWx+kIG9VLSny4S3QknOp2oIQpJZle/83mITg=",
+    endpoint: "vpnhh.workstation.co.uk:51820",
+    allowed_ips: ["10.8.0.0/24", "192.168.1.0/24"],
+    persistent_keepalive: "25",
+  }],
+};
+const home = { ...workstation, name: "Home", endpoint: "home.example.com:51820", peers: [] };
+
+const withProfiles = (active, up) => ({
+  mode: active ? "direct" : "signed_out",
+  profile: active ? [workstation, home].find((p) => p.name === active) : null,
+  profiles: [workstation, home],
+  interface: up ? "utun14" : null,
+  networks: [],
+  posture_signals: [],
+});
+
+test("every tunnel is listed, and only the live one shows as up", () => {
+  const items = tunnelList(withProfiles("Workstation VPN", true), "Home");
+  assert.deepEqual(items.map((i) => [i.name, i.up, i.selected]), [
+    ["Workstation VPN", true, false],
+    ["Home", false, true],
+  ]);
+  // The active profile with no interface is not "up".
+  assert.equal(tunnelList(withProfiles("Workstation VPN", false), null)[0].up, false);
+});
+
+test("the detail pane reads like the WireGuard app's", () => {
+  const d = tunnelDetail(withProfiles("Workstation VPN", false), "Workstation VPN");
+  assert.equal(d.title, "Workstation VPN");
+  assert.equal(d.statusText, "Inactive");
+  assert.deepEqual(d.interface, [
+    ["Public key", "Zt7XaS0Qo85y6nSRreRkxTnWAXICyYxfXtfhJJXO6Xk="],
+    ["Addresses", "10.8.0.18/32"],
+    ["MTU", "1280"],
+  ]);
+  assert.deepEqual(d.peers[0], [
+    ["Peer", "T7/CN8IWx+kIG9VLSny4S3QknOp2oIQpJZle/83mITg="],
+    ["Endpoint", "vpnhh.workstation.co.uk:51820"],
+    ["Allowed IPs", "10.8.0.0/24, 192.168.1.0/24"],
+    ["Persistent keepalive", "every 25 seconds"],
+  ]);
+  assert.deepEqual(d.action, { label: "Activate", command: "activate_profile" });
+});
+
+test("the live tunnel offers Deactivate; another tunnel offers to switch", () => {
+  const live = withProfiles("Workstation VPN", true);
+  const d = tunnelDetail(live, "Workstation VPN");
+  assert.equal(d.statusText, "Active");
+  assert.equal(d.up, true);
+  assert.deepEqual(d.action, { label: "Deactivate", command: "disconnect" });
+  assert.equal(d.interfaceName, "utun14");
+  assert.deepEqual(tunnelDetail(live, "Home").action, {
+    label: "Activate",
+    command: "activate_profile",
+  });
+});
+
+test("rows with nothing to say are left out", () => {
+  const d = tunnelDetail(withProfiles("Home", false), "Home");
+  assert.equal(d.peers.length, 0);
+  const bare = { ...home, public_key: null, mtu: null, dns: ["1.1.1.1"] };
+  const d2 = tunnelDetail({ ...withProfiles(null, false), profiles: [bare] }, "Home");
+  assert.deepEqual(d2.interface, [["Addresses", "10.8.0.18/32"], ["DNS servers", "1.1.1.1"]]);
+});
+
+test("a keepalive of 0 is off, as wg-quick reads it", () => {
+  const p = { ...workstation, peers: [{ ...workstation.peers[0], persistent_keepalive: "0" }] };
+  const d = tunnelDetail({ ...withProfiles(null, false), profiles: [p] }, "Workstation VPN");
+  assert.deepEqual(d.peers[0][3], ["Persistent keepalive", "off"]);
+});
+
+test("the selection survives refreshes, and falls back sensibly", () => {
+  const s = withProfiles("Workstation VPN", false);
+  assert.equal(chooseSelection(s, "Home"), "Home");
+  assert.equal(chooseSelection(s, "Removed"), "Workstation VPN", "the active one");
+  assert.equal(chooseSelection(s, "section:dns"), "section:dns", "a section stays selected");
+  const none = { ...withProfiles(null, false), profiles: [] };
+  assert.equal(chooseSelection(none, null), "section:organisation");
 });

@@ -29,6 +29,9 @@ pub struct AgentState {
     /// the control plane is not involved.
     #[serde(default)]
     pub profile: Option<DirectProfile>,
+    /// Every imported WireGuard config; `profile` is the one Connect uses.
+    #[serde(default)]
+    pub profiles: Vec<DirectProfile>,
 }
 
 /// How this agent connects.
@@ -49,6 +52,8 @@ pub struct AgentStatus {
     pub mode: Mode,
     pub control_url: String,
     pub profile: Option<DirectProfile>,
+    /// Every imported profile, for the tunnel list. `profile` is the active one.
+    pub profiles: Vec<DirectProfile>,
     pub user: Option<String>,
     pub device: Option<String>,
     pub identity: String,
@@ -210,6 +215,15 @@ impl AgentState {
             mode,
             control_url: self.control_url.clone(),
             profile: self.profile.clone(),
+            profiles: {
+                let mut all = self.profiles.clone();
+                if let Some(active) = &self.profile {
+                    if !all.iter().any(|p| p.name == active.name) {
+                        all.insert(0, active.clone());
+                    }
+                }
+                all
+            },
             user: self.email.clone(),
             device: self.device_name.clone(),
             identity: if self.access_token.is_some() {
@@ -501,6 +515,10 @@ mod tests {
             address: vec!["10.8.0.2/32".into()],
             dns: vec![],
             allowed_ips: vec!["10.8.0.0/24".into()],
+            public_key: None,
+            mtu: None,
+            listen_port: None,
+            peers: vec![],
         }
     }
 

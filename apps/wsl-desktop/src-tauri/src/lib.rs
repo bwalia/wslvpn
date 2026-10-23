@@ -291,9 +291,44 @@ async fn import_profile(text: String, name: String) -> Result<serde_json::Value,
     status().await
 }
 
+/// Delete a tunnel. `--` keeps a name from ever being read as a flag.
 #[tauri::command]
-async fn remove_profile() -> Result<serde_json::Value, CliError> {
-    run(&["profile", "remove"]).await?;
+async fn remove_profile(name: Option<String>) -> Result<serde_json::Value, CliError> {
+    match name.as_deref() {
+        Some(n) => run(&["profile", "remove", "--", n]).await?,
+        None => run(&["profile", "remove"]).await?,
+    };
+    status().await
+}
+
+/// Bring a tunnel up, replacing whichever one is up now.
+#[tauri::command]
+async fn activate_profile(name: String) -> Result<serde_json::Value, CliError> {
+    let flag = format!("--profile={name}");
+    run(&["connect", "--gui", &flag]).await?;
+    status().await
+}
+
+/// A tunnel's config file, for Edit. It holds the private key, which is why
+/// it is read only when someone asks to edit, and never kept by the window.
+#[tauri::command]
+async fn profile_config(name: String) -> Result<String, CliError> {
+    run(&["profile", "show", "--config", "--", &name]).await
+}
+
+/// Save an edited config over the tunnel of the same name. Validated by the
+/// CLI exactly as an import is; on stdin, like an import.
+#[tauri::command]
+async fn save_profile(name: String, text: String) -> Result<serde_json::Value, CliError> {
+    let flag = format!("--name={name}");
+    run_with_input(&["profile", "import", &flag, "-"], Some(&text)).await?;
+    status().await
+}
+
+/// Stop using imported tunnels for Connect, and use the control plane.
+#[tauri::command]
+async fn use_control_plane() -> Result<serde_json::Value, CliError> {
+    run(&["profile", "use", "--none"]).await?;
     status().await
 }
 
@@ -351,6 +386,10 @@ pub fn run_app() {
             set_control_url,
             import_profile,
             remove_profile,
+            activate_profile,
+            profile_config,
+            save_profile,
+            use_control_plane,
             dns_status,
             dns_set,
             dns_remove,

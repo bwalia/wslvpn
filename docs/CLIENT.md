@@ -149,11 +149,20 @@ it up and down through the same privileged path as a managed session:
 
 ```bash
 wsl profile import ~/Downloads/office.conf
-wsl connect
+wsl profile import ~/Downloads/home.conf
+wsl profile list                 # * marks the one Connect uses
+wsl connect --profile home       # replaces whatever tunnel is up
 wsl status
 wsl disconnect
-wsl profile remove        # back to signing in
+wsl profile show home --config   # the file itself, for editing
+wsl profile remove office
+wsl profile use --none           # use the control plane instead
 ```
+
+Each profile is stored as `<data dir>/profiles/<name>.conf`, mode 0600. One is
+up at a time, as the `wsl` interface; activating another takes the first down
+and brings the second up in one privileged run. A profile imported before
+there was a list is carried into it automatically.
 
 While a profile is imported it is what `connect` uses; `wsl status --json`
 reports `"mode": "direct"`. The file is validated on import, because `wg-quick`

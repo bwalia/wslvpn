@@ -88,6 +88,9 @@ enum Commands {
     Connect {
         #[arg(long)]
         network: Option<String>,
+        /// Connect with this imported profile, making it the active one.
+        #[arg(long, conflicts_with = "network")]
+        profile: Option<String>,
         /// Write the WireGuard config but do not bring the interface up.
         #[arg(long)]
         no_tunnel: bool,
@@ -145,13 +148,29 @@ enum ProfileCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show the imported profile.
-    Show {
+    /// List imported profiles; `*` marks the one Connect uses.
+    List {
         #[arg(long)]
         json: bool,
     },
-    /// Forget the imported profile and go back to signing in.
-    Remove,
+    /// Make NAME the profile Connect uses, or `--none` to use the control
+    /// plane instead.
+    Use {
+        name: Option<String>,
+        #[arg(long, conflicts_with = "name")]
+        none: bool,
+    },
+    /// Show a profile (the active one by default).
+    Show {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Print the config file itself, private key included, for editing.
+        #[arg(long, conflicts_with = "json")]
+        config: bool,
+    },
+    /// Delete a profile (the active one by default).
+    Remove { name: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -356,9 +375,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status { json } => print_status(&state, json)?,
         Commands::Connect {
             network,
+            profile: chosen,
             no_tunnel,
             privilege,
         } => {
+            if let Some(name) = chosen.as_deref() {
+                profile::select(&mut state, name)?;
+            }
             if state.mode() == Mode::Direct {
                 if no_tunnel {
                     anyhow::bail!("--no-tunnel has nothing to do for an imported profile");
@@ -628,13 +651,61 @@ fn profile_command(state: &mut AgentState, command: ProfileCommand) -> anyhow::R
                 println!("Connect with `wsl connect`.");
             }
         }
-        ProfileCommand::Show { json } => match &state.profile {
-            Some(p) if json => println!("{}", serde_json::to_string_pretty(p)?),
-            Some(p) => {
+        ProfileCommand::List { json } => {
+            let all = profile::list(state)?;
+            state.save()?;
+            let active = state.profile.as_ref().map(|p| p.name.clone());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("No profiles imported");
+            } else {
+                for p in &all {
+                    let mark = if Some(&p.name) == active.as_ref() {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{mark} {:<24} {}", p.name, p.endpoint);
+                }
+            }
+        }
+        ProfileCommand::Use { name, none } => {
+            if none {
+                state.profile = None;
+                state.save()?;
+                println!("Using the control plane; profiles are kept");
+            } else {
+                let name = name.context("name a profile, or pass --none")?;
+                let p = profile::select(state, &name)?;
+                println!("Connect now uses {}", p.name);
+            }
+        }
+        ProfileCommand::Show { name, json, config } => {
+            let name = name.or_else(|| state.profile.as_ref().map(|p| p.name.clone()));
+            let Some(name) = name else {
+                if json {
+                    println!("null");
+                } else {
+                    println!("No profile imported");
+                }
+                return Ok(());
+            };
+            if config {
+                print!("{}", profile::config_text(state, &name)?);
+                return Ok(());
+            }
+            let all = profile::list(state)?;
+            let p = all
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&name))
+                .with_context(|| format!("no profile named `{name}`"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(p)?);
+            } else {
                 println!("Name:       {}", p.name);
-                println!("Endpoint:   {}", p.endpoint);
+                println!("Public key: {}", p.public_key.as_deref().unwrap_or("-"));
                 println!("Address:    {}", p.address.join(", "));
-                println!("AllowedIPs: {}", p.allowed_ips.join(", "));
                 println!(
                     "DNS:        {}",
                     if p.dns.is_empty() {
@@ -643,12 +714,15 @@ fn profile_command(state: &mut AgentState, command: ProfileCommand) -> anyhow::R
                         p.dns.join(", ")
                     }
                 );
+                for peer in &p.peers {
+                    println!("Peer:       {}", peer.public_key);
+                    println!("  Endpoint:   {}", peer.endpoint.as_deref().unwrap_or("-"));
+                    println!("  AllowedIPs: {}", peer.allowed_ips.join(", "));
+                }
             }
-            None if json => println!("null"),
-            None => println!("No profile imported"),
-        },
-        ProfileCommand::Remove => {
-            profile::remove(state)?;
+        }
+        ProfileCommand::Remove { name } => {
+            profile::remove(state, name.as_deref())?;
             println!("Profile removed");
         }
     }

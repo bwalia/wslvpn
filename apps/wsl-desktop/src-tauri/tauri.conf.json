@@ -14,10 +14,11 @@
     "windows": [
       {
         "title": "WSL Zero Trust",
-        "width": 460,
-        "height": 720,
+        "width": 880,
+        "height": 600,
         "resizable": true,
-        "minHeight": 480
+        "minWidth": 640,
+        "minHeight": 420
       }
     ],
     "security": {

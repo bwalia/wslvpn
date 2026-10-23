@@ -203,3 +203,80 @@ export function otherVpnWarning(status) {
   return `The WireGuard app also has ${list} connected. If both tunnels route ` +
     "the same addresses, disconnect one of them.";
 }
+
+// --- The tunnel list and detail pane ------------------------------------
+
+/** Whether the live interface belongs to profile `name`. */
+function isUp(status, name) {
+  return status.profile?.name === name && Boolean(status.interface);
+}
+
+/** The sidebar's tunnels, in import order. */
+export function tunnelList(status, selected) {
+  return (status.profiles ?? []).map((p) => ({
+    name: p.name,
+    up: isUp(status, p.name),
+    selected: p.name === selected,
+  }));
+}
+
+function keepalive(value) {
+  if (value == null || value === "") return null;
+  const seconds = Number(value);
+  if (seconds === 0 || value === "off") return "off";
+  return `every ${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
+/** Label/value rows, leaving out whatever the config does not set. */
+function rows(pairs) {
+  return pairs.filter(([, v]) => v != null && v !== "" && !(Array.isArray(v) && !v.length))
+    .map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]);
+}
+
+/**
+ * The detail pane for one tunnel, laid out as the WireGuard app lays it out.
+ * Only one tunnel runs at a time: activating another replaces it, in one
+ * privileged step.
+ */
+export function tunnelDetail(status, name) {
+  const p = (status.profiles ?? []).find((x) => x.name === name);
+  if (!p) return null;
+  const up = isUp(status, name);
+  return {
+    title: p.name,
+    up,
+    statusText: up ? "Active" : "Inactive",
+    interfaceName: up ? status.interface : null,
+    interface: rows([
+      ["Public key", p.public_key],
+      ["Addresses", p.address],
+      ["DNS servers", p.dns],
+      ["Listen port", p.listen_port],
+      ["MTU", p.mtu],
+    ]),
+    peers: (p.peers ?? []).map((peer) =>
+      rows([
+        ["Peer", peer.public_key],
+        ["Endpoint", peer.endpoint],
+        ["Allowed IPs", peer.allowed_ips],
+        ["Persistent keepalive", keepalive(peer.persistent_keepalive)],
+      ])
+    ),
+    action: up
+      ? { label: "Deactivate", command: "disconnect" }
+      : { label: "Activate", command: "activate_profile" },
+  };
+}
+
+/**
+ * What the sidebar should have selected after a refresh: what was selected,
+ * if it still exists; else the active tunnel; else the first; else signing in.
+ * Sections (organisation, DNS, posture) are named `section:<id>`.
+ */
+export function chooseSelection(status, current) {
+  const names = (status.profiles ?? []).map((p) => p.name);
+  if (current?.startsWith("section:")) return current;
+  if (current && names.includes(current)) return current;
+  if (status.profile && names.includes(status.profile.name)) return status.profile.name;
+  return names[0] ?? "section:organisation";
+}

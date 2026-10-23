@@ -385,6 +385,38 @@ fn imported(w: &mut Agent, name: String) {
     profile::import(&mut w.state, &config_with(None), &name).expect("import");
 }
 
+#[given(expr = "I have imported the WireGuard config {string} pointing at {string}")]
+fn imported_pointing_at(w: &mut Agent, name: String, host: String) {
+    let text = config_with(None).replace("vpn.example.com", &host);
+    profile::import(&mut w.state, &text, &name).expect("import");
+}
+
+#[when(expr = "I connect with the profile {string}")]
+async fn connect_with_profile(w: &mut Agent, name: String) {
+    profile::select(&mut w.state, &name).expect("select");
+    w.error = connect(w).await.err();
+}
+
+#[when(expr = "I remove the profile {string}")]
+fn remove_profile(w: &mut Agent, name: String) {
+    w.error = profile::remove(&mut w.state, Some(&name))
+        .err()
+        .map(|e| format!("{e:#}"));
+}
+
+#[then(expr = "wg-quick brought up the config for {string}")]
+fn brought_up_for(w: &mut Agent, host: String) {
+    let used = std::fs::read_to_string(w.dir.join("conf-at-up")).unwrap();
+    assert!(used.contains(&format!("Endpoint = {host}:51820")), "{used}");
+}
+
+#[then(expr = "the status lists the profiles {string}")]
+fn status_lists(w: &mut Agent, names: String) {
+    let listed: Vec<String> = w.status().profiles.into_iter().map(|p| p.name).collect();
+    let want: Vec<String> = names.split(", ").map(String::from).collect();
+    assert_eq!(listed, want);
+}
+
 #[when(expr = "I import a WireGuard config containing {string}")]
 fn import_containing(w: &mut Agent, line: String) {
     w.error = profile::import(&mut w.state, &config_with(Some(&line)), "x")
@@ -681,7 +713,10 @@ fn fails_mentioning(w: &mut Agent, text: String) {
 fn no_profile(w: &mut Agent) {
     w.reload();
     assert!(w.state.profile.is_none());
-    assert!(!profile::profile_conf_path().unwrap().exists());
+    assert!(w.state.profiles.is_empty());
+    let dir = AgentState::data_dir().unwrap().join("profiles");
+    let confs = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(confs, 0, "nothing stored under {}", dir.display());
 }
 
 #[then("the control plane issued a session for this device")]
