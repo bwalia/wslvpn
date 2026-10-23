@@ -12,9 +12,17 @@
 //! a terminal. When neither is possible the error says exactly what to run
 //! instead of failing somewhere deep inside a shell script.
 
+// The wg-quick path below is compiled everywhere so its planning stays
+// testable on every platform; on Windows the tunnel goes through
+// `wireguard.exe` instead and that path is simply not called.
+#![cfg_attr(windows, allow(dead_code))]
+
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+
+#[path = "tunnel_windows.rs"]
+pub mod windows;
 
 /// The interface name. `wg-quick` derives it from the config file's basename,
 /// so the config has to be written as `<INTERFACE>.conf` for the two to agree.
@@ -108,9 +116,16 @@ fn search_path(binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
     // SAFETY: geteuid is always safe to call and cannot fail.
     unsafe { libc::geteuid() == 0 }
+}
+
+/// Windows has no root; elevation is handled in [`windows`].
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
 }
 
 /// What a caller is able to do about not being root.
@@ -397,22 +412,48 @@ pub async fn up(conf: &Path, escalation: Escalation) -> Result<TunnelState> {
 /// [`up`], naming a different way out when there is no privilege to be had.
 pub async fn up_with_hint(conf: &Path, escalation: Escalation, hint: &str) -> Result<TunnelState> {
     ensure_conf(conf)?;
-    let wg = WgQuick::locate()?;
-    let mut steps = Vec::new();
-    if state().is_up() {
-        steps.push(wg.step(Action::Down, conf));
+    #[cfg(windows)]
+    {
+        let _ = hint;
+        let exe = windows::find_wireguard_exe().ok_or_else(windows::not_installed)?;
+        let mut steps = Vec::new();
+        if state().is_up() {
+            steps.push(windows::step(&exe, Action::Down, conf));
+        }
+        steps.push(windows::step(&exe, Action::Up, conf));
+        windows::run::run(&steps, escalation, WINDOWS_HINT).await?;
+        let state = windows::run::wait_until_up().await;
+        if !state.is_up() {
+            bail!(
+                "wireguard.exe reported success but the WireGuardTunnel$wsl service is \
+                 not running. Open the WireGuard app for its log."
+            );
+        }
+        Ok(state)
     }
-    steps.push(wg.step(Action::Up, conf));
-    run_privileged(&steps, &wg.path(), escalation, hint).await?;
-    let state = state();
-    if !state.is_up() {
-        bail!(
-            "wg-quick reported success but no interface appeared. \
+    #[cfg(not(windows))]
+    {
+        let wg = WgQuick::locate()?;
+        let mut steps = Vec::new();
+        if state().is_up() {
+            steps.push(wg.step(Action::Down, conf));
+        }
+        steps.push(wg.step(Action::Up, conf));
+        run_privileged(&steps, &wg.path(), escalation, hint).await?;
+        let state = state();
+        if !state.is_up() {
+            bail!(
+                "wg-quick reported success but no interface appeared. \
              Check `wg show` and the system log."
-        );
+            );
+        }
+        Ok(state)
     }
-    Ok(state)
 }
+
+/// What to do on Windows when elevation cannot be asked for.
+#[cfg(windows)]
+const WINDOWS_HINT: &str = "Run the command from a terminal opened with \"Run as administrator\".";
 
 /// Tear the interface down. Already-down is success, not an error: a user who
 /// runs `disconnect` twice wants the tunnel gone, and it is.
@@ -420,16 +461,29 @@ pub async fn down(conf: &Path, escalation: Escalation) -> Result<()> {
     if !state().is_up() {
         return Ok(());
     }
-    ensure_conf(conf)?;
-    let wg = WgQuick::locate()?;
-    let steps = [wg.step(Action::Down, conf)];
-    run_privileged(
-        &steps,
-        &wg.path(),
-        escalation,
-        &unavailable_hint(Action::Down),
-    )
-    .await
+    #[cfg(windows)]
+    {
+        let exe = windows::find_wireguard_exe().ok_or_else(windows::not_installed)?;
+        windows::run::run(
+            &[windows::step(&exe, Action::Down, conf)],
+            escalation,
+            WINDOWS_HINT,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        ensure_conf(conf)?;
+        let wg = WgQuick::locate()?;
+        let steps = [wg.step(Action::Down, conf)];
+        run_privileged(
+            &steps,
+            &wg.path(),
+            escalation,
+            &unavailable_hint(Action::Down),
+        )
+        .await
+    }
 }
 
 fn ensure_conf(conf: &Path) -> Result<()> {
@@ -538,6 +592,11 @@ pub fn explain_graphical_failure(what: &str, stderr: &str) -> String {
 /// This deliberately avoids `wg show`, which needs root: a user should be able
 /// to run `wsl status` without a password prompt and still get the truth.
 pub fn state() -> TunnelState {
+    #[cfg(windows)]
+    {
+        windows::run::state()
+    }
+    #[cfg(not(windows))]
     match resolved_interface() {
         Some(interface) if interface_exists(&interface) => TunnelState::Up { interface },
         _ => TunnelState::Down,
@@ -559,8 +618,81 @@ fn resolved_interface() -> Option<String> {
             let name = contents.trim();
             (!name.is_empty()).then(|| name.to_string())
         }
+        // Current wg-quick on macOS writes the file 0400 root. The tunnel is
+        // ours if a utun wg-quick made carries the address our config gave it.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let conf = crate::state::AgentState::wg_conf_path()
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            pick_interface(
+                &socket_interfaces(&run_dir),
+                &conf_addresses(&conf),
+                ifconfig_output,
+            )
+        }
         Err(_) => Some(INTERFACE.to_string()),
     }
+}
+
+/// The interfaces wg-quick is serving: it leaves `<utun>.sock` for each in its
+/// run directory, which (unlike `wsl.name`) anyone may list.
+fn socket_interfaces(run_dir: &Path) -> Vec<String> {
+    std::fs::read_dir(run_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()
+                        .and_then(|n| n.strip_suffix(".sock"))
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The interface addresses in a wg-quick config, without their prefixes.
+fn conf_addresses(conf: &str) -> Vec<String> {
+    conf.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split('#').next()?.split_once('=')?;
+            key.trim().eq_ignore_ascii_case("address").then_some(value)
+        })
+        .flat_map(|value| value.split(','))
+        .filter_map(|a| a.trim().split('/').next().map(str::to_string))
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// The first candidate whose `ifconfig` shows one of `addresses`, matched as a
+/// whole word so `10.8.0.18` never matches `10.8.0.180`.
+fn pick_interface(
+    candidates: &[String],
+    addresses: &[String],
+    ifconfig: impl Fn(&str) -> String,
+) -> Option<String> {
+    candidates.iter().find_map(|name| {
+        let out = ifconfig(name);
+        let words: Vec<&str> = out.split_whitespace().collect();
+        let ours = words.windows(2).any(|w| {
+            (w[0] == "inet" || w[0] == "inet6")
+                && addresses
+                    .iter()
+                    .any(|a| w[1].split('%').next() == Some(a.as_str()))
+        });
+        ours.then(|| name.clone())
+    })
+}
+
+fn ifconfig_output(name: &str) -> String {
+    std::process::Command::new("ifconfig")
+        .arg(name)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 fn interface_exists(name: &str) -> bool {
@@ -578,9 +710,114 @@ fn interface_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Tunnels the official WireGuard app has connected right now.
+///
+/// The WireGuard app runs its tunnels as macOS network extensions, which our
+/// `wg-quick` interface knows nothing about. Two tunnels that both claim the
+/// default route — or the same private range — leave traffic going wherever
+/// the routing table last pointed, which looks to a user like "connected but
+/// nothing works". Naming the other tunnel is the useful thing to do; stopping
+/// it is the user's call, so this only reports.
+pub fn other_wireguard_tunnels() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        windows::run::other_tunnels()
+    }
+    #[cfg(not(windows))]
+    {
+        if !cfg!(target_os = "macos") {
+            return Vec::new();
+        }
+        std::process::Command::new("/usr/sbin/scutil")
+            .args(["--nc", "list"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|out| parse_nc_list(&String::from_utf8_lossy(&out.stdout)))
+            .unwrap_or_default()
+    }
+}
+
+/// The names of connected WireGuard-app services in `scutil --nc list`.
+///
+/// A line looks like
+/// `* (Connected)  <UUID> VPN (com.wireguard.macos) "office"  [VPN/com.wireguard.macos]`;
+/// older releases print the name unquoted.
+pub fn parse_nc_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.contains("(Connected)") && line.contains("com.wireguard."))
+        .filter_map(|line| {
+            let after = line.split_once("com.wireguard.")?.1;
+            let after = after.split_once(')')?.1;
+            let name = after.split('[').next()?.trim();
+            let name = name.trim_matches('"').trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// wg-quick on current macOS writes `wsl.name` mode 0400 root, so a user
+    /// cannot read which `utun` is ours. The tunnel is still found: by the
+    /// sockets wg-quick leaves in the run directory, and the address our own
+    /// config gave the interface.
+    #[test]
+    fn our_interface_is_found_by_its_address_when_the_name_file_is_root_only() {
+        let conf = "[Interface]\nPrivateKey = k\nAddress = 10.8.0.18/32, fd00::12/128\nMTU = 1280\n\n[Peer]\nAllowedIPs = 10.8.0.0/24\n";
+        assert_eq!(conf_addresses(conf), vec!["10.8.0.18", "fd00::12"]);
+        let ifconfig = |name: &str| match name {
+            "utun3" => {
+                "utun3: flags=8051<UP>\n\tinet 100.64.0.2 --> 100.64.0.2 netmask 0xffffffff\n"
+                    .to_string()
+            }
+            "utun14" => {
+                "utun14: flags=8051<UP>\n\tinet 10.8.0.18 --> 10.8.0.18 netmask 0xffffffff\n"
+                    .to_string()
+            }
+            _ => String::new(),
+        };
+        let candidates = vec!["utun3".to_string(), "utun14".to_string()];
+        assert_eq!(
+            pick_interface(&candidates, &conf_addresses(conf), ifconfig),
+            Some("utun14".to_string())
+        );
+        // Another tunnel's address that merely starts the same is not ours.
+        let other = |_: &str| "\tinet 10.8.0.180 --> 10.8.0.180\n".to_string();
+        assert_eq!(
+            pick_interface(&candidates, &conf_addresses(conf), other),
+            None
+        );
+    }
+
+    #[test]
+    fn sockets_in_the_run_directory_name_the_candidates() {
+        let dir = std::env::temp_dir().join(format!("wsl-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["utun14.sock", "utun3.sock", "wsl.name", "notes.txt"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let mut found = socket_interfaces(&dir);
+        found.sort();
+        assert_eq!(found, vec!["utun14", "utun3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn connected_wireguard_app_tunnels_are_named_and_others_ignored() {
+        let out = "Available network connection services in the current set (*=enabled):\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000001 VPN (com.wireguard.macos) \"office\"                     [VPN/com.wireguard.macos]\n\
+            * (Disconnected)   6B2A1C3D-0000-4000-8000-000000000002 VPN (com.wireguard.macos) \"home\"                       [VPN/com.wireguard.macos]\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000003 VPN (com.cisco.anyconnect) \"Corp\"                      [VPN/com.cisco.anyconnect]\n\
+            * (Connected)      6B2A1C3D-0000-4000-8000-000000000004 VPN (com.wireguard.macos) lab                            [VPN/com.wireguard.macos]\n";
+        assert_eq!(parse_nc_list(out), vec!["office", "lab"]);
+        assert!(parse_nc_list(
+            "Available network connection services in the current set (*=enabled):\n"
+        )
+        .is_empty());
+    }
 
     fn wg(bash: Option<&str>) -> WgQuick {
         WgQuick {

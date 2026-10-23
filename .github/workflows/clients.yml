@@ -1,0 +1,154 @@
+name: clients
+
+# The apps people install: the `wsl` CLI and the desktop window, for macOS,
+# Linux and Windows. Each pull request tests the client crates and builds an
+# installable app on all three, so "it works on my Mac" is not the only
+# evidence. A `v*` tag attaches the installers to the GitHub release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The agent, CLI and resolver on each OS they ship to. The control plane and
+  # gateway are Linux services and are covered by ci.yml.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy -p wsl-agent -p wsl-cli -p wsl-dns -p wsl-types --all-targets -- -D warnings
+      - name: test
+        run: cargo test -p wsl-agent -p wsl-cli -p wsl-dns -p wsl-types
+
+  desktop:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+            label: macos-arm64
+          # Built on Apple silicon: the Intel runner images are being retired
+          # and a job asking for one waits in the queue indefinitely.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+            label: macos-x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            label: linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            label: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/wsl-desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/wsl-desktop/package-lock.json
+
+      - name: webview and packaging libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+
+      # The window drives the CLI, so the CLI ships inside the app (Tauri's
+      # externalBin resolves binaries/wsl to binaries/wsl-<target>[.exe]).
+      - name: build the CLI
+        run: cargo build --release -p wsl-cli --target ${{ matrix.target }}
+      - name: place the CLI inside the app
+        shell: bash
+        run: |
+          ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          mkdir -p apps/wsl-desktop/src-tauri/binaries
+          cp "target/${{ matrix.target }}/release/wsl${ext}" \
+             "apps/wsl-desktop/src-tauri/binaries/wsl-${{ matrix.target }}${ext}"
+
+      # Run natively only: in the Intel-on-Apple-silicon cross-build the host
+      # test binary would look for an arm64 CLI next to it. The arm64 job runs
+      # the same tests.
+      - name: bridge tests
+        if: matrix.label != 'macos-x64'
+        working-directory: apps/wsl-desktop/src-tauri
+        run: cargo test
+
+      - name: build the app
+        working-directory: apps/wsl-desktop
+        run: |
+          npm ci
+          npm test
+          npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      # On Windows `wsl.exe` is Microsoft's Windows Subsystem for Linux, so the
+      # stand-alone CLI is published as `wslvpn.exe`. Inside the app it keeps
+      # its name; the app only ever runs its own copy.
+      - name: collect
+        shell: bash
+        run: |
+          out="dist-${{ matrix.label }}"; mkdir -p "$out"
+          b="apps/wsl-desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          find "$b" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \
+               -o -name '*.msi' -o -name '*.exe' \) -exec cp {} "$out/" \;
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/wsl.exe" "$out/wslvpn-cli-${{ matrix.label }}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/wsl" "$out/wsl-cli-${{ matrix.label }}"
+          fi
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wslvpn-${{ matrix.label }}
+          path: dist-${{ matrix.label }}/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: desktop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

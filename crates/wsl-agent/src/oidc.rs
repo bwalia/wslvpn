@@ -284,21 +284,41 @@ fn page(status: u16, title: &str, message: &str) -> String {
 }
 
 fn launch_browser(url: &str) {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
+    let (opener, args) = browser_command(url);
     // A failure here is not fatal: the URL was printed, and pasting it works.
     let _ = std::process::Command::new(opener)
-        .arg(url)
+        .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
 }
 
+/// How to open `url` in the default browser.
+///
+/// Windows has no `open`. `cmd /C start` would hand the URL to cmd, which
+/// splits it at every `&` — and an authorize URL is all `&`s. The URL protocol
+/// handler takes it as one argument instead.
+fn browser_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(windows) {
+        (
+            "rundll32",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        )
+    } else {
+        ("xdg-open", vec![url.to_string()])
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_whole_url_reaches_the_browser_as_one_argument() {
+        let url = "https://vpn.example.com/auth/oidc/authorize?redirect_uri=x&client_challenge=y";
+        let (_, args) = super::browser_command(url);
+        assert_eq!(args.last().map(String::as_str), Some(url));
+    }
 
     /// A server that answers every request with `status` and `body`.
     async fn serve(status: u16, body: &'static str) -> String {

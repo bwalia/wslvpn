@@ -10,6 +10,16 @@ ignore = [
     # built with default-features = false and the postgres driver only.
     # No fixed version exists upstream. Last checked: 2026-09-01.
     "RUSTSEC-2023-0071",
+    # `zip` 3 is a build-dependency of utoipa-swagger-ui only: it unpacks the
+    # pinned Swagger UI bundle at compile time and is not in any binary. The
+    # fix (zip >= 9) needs utoipa-swagger-ui 10, which needs utoipa 6.
+    # See .cargo/audit.toml. Last checked: 2026-10-24.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    # unsafe-libyaml is unmaintained (no known vulnerability), via serde_yaml,
+    # which reads operator-owned config files only. Last checked: 2026-10-24.
+    "RUSTSEC-2024-0449",
 ]
 
 [licenses]

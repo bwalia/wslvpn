@@ -3,6 +3,7 @@
 pub mod client;
 pub mod dns;
 pub mod oidc;
+pub mod opsapi;
 pub mod posture;
 pub mod profile;
 pub mod state;

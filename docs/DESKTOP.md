@@ -11,10 +11,14 @@ The GUI holds no state. Every field it shows comes from `wsl status --json`, and
 every button runs a CLI command — so "connected" has one implementation and the
 window cannot disagree with `wsl status` in a terminal.
 
-There are two ways in. **Sign in** to a control plane (its URL is entered on
-the first screen), or **Import WireGuard config** to connect straight to an
-existing WireGuard server with the `.conf` its administrator issued — no
-control plane needed. Either way, Connect and Disconnect do the same thing:
+There are three ways in. **Sign in with browser** to a control plane (its URL
+is entered on the first screen); **Sign in with OpsAPI** — email, password and
+the emailed code — when that control plane offers it (see
+[OPSAPI.md](OPSAPI.md#signing-in-with-an-opsapi-account)); or **Import WireGuard
+config** to connect straight to an existing WireGuard server with the `.conf`
+its administrator issued — no control plane needed. Configs exported by the
+official WireGuard apps import as they are, including Windows ones with a byte
+order mark and CRLF line endings. Either way, Connect and Disconnect do the same thing:
 see [CLIENT.md](CLIENT.md#connecting-with-a-wireguard-config). The dashboard
 also manages [DNS overrides](DNS.md).
 

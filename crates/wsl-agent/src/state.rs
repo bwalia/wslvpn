@@ -29,6 +29,9 @@ pub struct AgentState {
     /// the control plane is not involved.
     #[serde(default)]
     pub profile: Option<DirectProfile>,
+    /// Every imported WireGuard config; `profile` is the one Connect uses.
+    #[serde(default)]
+    pub profiles: Vec<DirectProfile>,
 }
 
 /// How this agent connects.
@@ -49,6 +52,8 @@ pub struct AgentStatus {
     pub mode: Mode,
     pub control_url: String,
     pub profile: Option<DirectProfile>,
+    /// Every imported profile, for the tunnel list. `profile` is the active one.
+    pub profiles: Vec<DirectProfile>,
     pub user: Option<String>,
     pub device: Option<String>,
     pub identity: String,
@@ -62,6 +67,10 @@ pub struct AgentStatus {
     /// Every signal behind the `posture` summary, so a user can see which check
     /// is the one holding them up.
     pub posture_signals: Vec<PostureSignal>,
+    /// Tunnels the official WireGuard app has connected alongside ours. Two
+    /// tunnels competing for the same routes is the usual reason "connected"
+    /// carries no traffic, so the window says so.
+    pub other_wireguard: Vec<String>,
 }
 
 /// Reduce the signals to one line.
@@ -175,7 +184,9 @@ impl AgentState {
     /// the two is what let the agent claim it was connected when it was not.
     pub fn status(&self, tunnel: &TunnelState) -> AgentStatus {
         let signals = posture::collect();
-        self.status_with_posture(tunnel, signals)
+        let mut status = self.status_with_posture(tunnel, signals);
+        status.other_wireguard = crate::tunnel::other_wireguard_tunnels();
+        status
     }
 
     /// The same report from a given set of signals, so the summary can be
@@ -204,6 +215,15 @@ impl AgentState {
             mode,
             control_url: self.control_url.clone(),
             profile: self.profile.clone(),
+            profiles: {
+                let mut all = self.profiles.clone();
+                if let Some(active) = &self.profile {
+                    if !all.iter().any(|p| p.name == active.name) {
+                        all.insert(0, active.clone());
+                    }
+                }
+                all
+            },
             user: self.email.clone(),
             device: self.device_name.clone(),
             identity: if self.access_token.is_some() {
@@ -220,6 +240,7 @@ impl AgentState {
                 TunnelState::Down => None,
             },
             posture_signals,
+            other_wireguard: Vec::new(),
         }
     }
 
@@ -425,9 +446,11 @@ mod tests {
             data_dir_from(Some("".into()), home.clone()).unwrap(),
             PathBuf::from("/Users/a/Library/Application Support/wsl-zerotrust")
         );
+        // Absolute on this platform: `/tmp/x` is not, on Windows.
+        let absolute = std::env::temp_dir().join("x");
         assert_eq!(
-            data_dir_from(Some("/tmp/x".into()), home.clone()).unwrap(),
-            PathBuf::from("/tmp/x")
+            data_dir_from(Some(absolute.clone().into()), home.clone()).unwrap(),
+            absolute
         );
         assert!(data_dir_from(Some("relative".into()), home).is_err());
         assert!(data_dir_from(None, None).is_err());
@@ -492,6 +515,10 @@ mod tests {
             address: vec!["10.8.0.2/32".into()],
             dns: vec![],
             allowed_ips: vec!["10.8.0.0/24".into()],
+            public_key: None,
+            mtu: None,
+            listen_port: None,
+            peers: vec![],
         }
     }
 

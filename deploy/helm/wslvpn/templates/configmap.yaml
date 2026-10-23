@@ -57,6 +57,14 @@ data:
           - {{ . | quote }}
           {{- end }}
         {{- end }}
+      {{- if .Values.config.opsapi.enabled }}
+      opsapi:
+        url: {{ required "config.opsapi.url is required when OpsAPI sign-in is enabled" .Values.config.opsapi.url | quote }}
+        namespace: {{ required "config.opsapi.namespace is required when OpsAPI sign-in is enabled" .Values.config.opsapi.namespace | quote }}
+        # From the existing Secret, like every other credential.
+        api_key: "${WSL_OPSAPI_API_KEY}"
+        verify_on_connect: {{ .Values.config.opsapi.verifyOnConnect }}
+      {{- end }}
 
     wireguard:
       default_port: {{ .Values.config.wireguard.defaultPort }}

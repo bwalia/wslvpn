@@ -48,13 +48,33 @@ enum Commands {
         /// plane only serves it when bound to loopback.
         #[arg(long)]
         dev: bool,
-        /// Email for --dev. Ignored by SSO, which gets identity from the
-        /// provider.
-        #[arg(long, default_value = "alice@example.com")]
-        email: String,
+        /// Email for --dev and --opsapi. Ignored by browser sign-in, which
+        /// gets identity from the provider.
+        #[arg(long)]
+        email: Option<String>,
         /// Print the sign-in URL but do not open a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in with an OpsAPI account (email and password) instead of the
+        /// browser. The password goes to OpsAPI, not to the control plane.
+        #[arg(long, conflicts_with = "dev")]
+        opsapi: bool,
+        /// Finish an OpsAPI sign-in with the code OpsAPI emailed.
+        #[arg(long, requires = "opsapi")]
+        code: bool,
+        /// Read secrets from stdin rather than prompting: the password, or
+        /// with --code the challenge and then the code, one per line. Secrets
+        /// never go on the command line, where `ps` would show them.
+        #[arg(long)]
+        stdin: bool,
+        /// Report the outcome as JSON (with --opsapi).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show which ways of signing in the control plane offers.
+    SignInMethods {
+        #[arg(long)]
+        json: bool,
     },
     /// Sign out and forget the session.
     Logout,
@@ -68,6 +88,9 @@ enum Commands {
     Connect {
         #[arg(long)]
         network: Option<String>,
+        /// Connect with this imported profile, making it the active one.
+        #[arg(long, conflicts_with = "network")]
+        profile: Option<String>,
         /// Write the WireGuard config but do not bring the interface up.
         #[arg(long)]
         no_tunnel: bool,
@@ -125,13 +148,29 @@ enum ProfileCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show the imported profile.
-    Show {
+    /// List imported profiles; `*` marks the one Connect uses.
+    List {
         #[arg(long)]
         json: bool,
     },
-    /// Forget the imported profile and go back to signing in.
-    Remove,
+    /// Make NAME the profile Connect uses, or `--none` to use the control
+    /// plane instead.
+    Use {
+        name: Option<String>,
+        #[arg(long, conflicts_with = "name")]
+        none: bool,
+    },
+    /// Show a profile (the active one by default).
+    Show {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Print the config file itself, private key included, for editing.
+        #[arg(long, conflicts_with = "json")]
+        config: bool,
+    },
+    /// Delete a profile (the active one by default).
+    Remove { name: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -225,11 +264,96 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login {
+            opsapi: true,
+            email,
+            code,
+            stdin,
+            json,
+            ..
+        } => {
+            let signed_in = if code {
+                let challenge = read_secret_line(stdin, "Challenge: ")?;
+                let code = read_secret_line(stdin, "Code from the email: ")?;
+                client
+                    .opsapi_verify_code(&mut state, &challenge, &code)
+                    .await?;
+                true
+            } else {
+                let email = match email {
+                    Some(e) => e,
+                    None if !stdin => prompt_line("Email: ")?,
+                    None => anyhow::bail!("--email is required with --stdin"),
+                };
+                let password = read_password(stdin)?;
+                match client.opsapi_login(&mut state, &email, &password).await? {
+                    None => true,
+                    Some(step) if json => {
+                        // The app holds the challenge and calls back with the code.
+                        println!("{}", serde_json::to_string(&step)?);
+                        false
+                    }
+                    Some(wsl_agent::opsapi::Step::CodeRequired { challenge, email }) if !stdin => {
+                        eprintln!("A sign-in code was sent to {email}.");
+                        let code = prompt_line("Code: ")?;
+                        client
+                            .opsapi_verify_code(&mut state, &challenge, &code)
+                            .await?;
+                        true
+                    }
+                    Some(_) => anyhow::bail!(
+                        "OpsAPI sent a sign-in code; run again with --json to receive the challenge"
+                    ),
+                }
+            };
+            if signed_in {
+                client.ensure_device(&mut state).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "signed_in",
+                            "email": state.email,
+                            "device": state.device_name,
+                        })
+                    );
+                } else {
+                    println!(
+                        "Signed in as {}",
+                        state.email.as_deref().unwrap_or("(unknown)")
+                    );
+                    println!(
+                        "Device registered: {}",
+                        state.device_name.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+        }
+        Commands::SignInMethods { json } => {
+            let methods = client.sign_in_methods(&state).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&methods)?);
+            } else {
+                println!(
+                    "Browser sign-in: {}",
+                    if methods.oidc { "yes" } else { "no" }
+                );
+                match methods.opsapi {
+                    Some(o) => println!(
+                        "OpsAPI sign-in:  yes ({}, workspace {})",
+                        o.url, o.namespace
+                    ),
+                    None => println!("OpsAPI sign-in:  no"),
+                }
+            }
+        }
+        Commands::Login {
             dev,
             email,
             no_browser,
+            ..
         } => {
             if dev {
+                let email = email.unwrap_or_else(|| "alice@example.com".into());
                 client.dev_login(&mut state, &email).await?;
             } else {
                 client.login(&mut state, !no_browser).await?;
@@ -251,9 +375,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status { json } => print_status(&state, json)?,
         Commands::Connect {
             network,
+            profile: chosen,
             no_tunnel,
             privilege,
         } => {
+            if let Some(name) = chosen.as_deref() {
+                profile::select(&mut state, name)?;
+            }
             if state.mode() == Mode::Direct {
                 if no_tunnel {
                     anyhow::bail!("--no-tunnel has nothing to do for an imported profile");
@@ -379,6 +507,62 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One line from stdin, without its newline.
+fn stdin_line() -> anyhow::Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading stdin")?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn prompt_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+    Ok(stdin_line()?.trim().to_string())
+}
+
+fn read_secret_line(from_stdin: bool, prompt: &str) -> anyhow::Result<String> {
+    let line = if from_stdin {
+        stdin_line()?
+    } else {
+        prompt_line(prompt)?
+    };
+    if line.trim().is_empty() {
+        anyhow::bail!("{} was empty", prompt.trim_end_matches([':', ' ']));
+    }
+    Ok(line.trim().to_string())
+}
+
+/// The password, from stdin or a terminal prompt that does not echo it.
+fn read_password(from_stdin: bool) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    if from_stdin || !std::io::stdin().is_terminal() {
+        let line = stdin_line()?;
+        if line.is_empty() {
+            anyhow::bail!("no password on stdin");
+        }
+        return Ok(line);
+    }
+    let stty = |arg: &str| {
+        std::process::Command::new("stty")
+            .arg(arg)
+            .stdin(std::process::Stdio::inherit())
+            .status()
+    };
+    eprint!("Password: ");
+    let _ = stty("-echo");
+    let line = stdin_line();
+    let _ = stty("echo");
+    eprintln!();
+    let line = line?;
+    if line.is_empty() {
+        anyhow::bail!("no password entered");
+    }
+    Ok(line)
+}
+
 fn print_status(state: &AgentState, json: bool) -> anyhow::Result<()> {
     let status = state.status(&wsl_agent::tunnel::state());
     if json {
@@ -427,6 +611,14 @@ fn print_status(state: &AgentState, json: bool) -> anyhow::Result<()> {
             println!("  {:<16} {}", n.name, n.state);
         }
     }
+    if !status.other_wireguard.is_empty() {
+        println!();
+        println!(
+            "Warning: the WireGuard app also has {} connected; two tunnels \
+             competing for the same routes can leave this one carrying no traffic.",
+            status.other_wireguard.join(", ")
+        );
+    }
     if let Some(exp) = &status.session_expires {
         println!();
         println!("Session expires: {exp}");
@@ -459,13 +651,61 @@ fn profile_command(state: &mut AgentState, command: ProfileCommand) -> anyhow::R
                 println!("Connect with `wsl connect`.");
             }
         }
-        ProfileCommand::Show { json } => match &state.profile {
-            Some(p) if json => println!("{}", serde_json::to_string_pretty(p)?),
-            Some(p) => {
+        ProfileCommand::List { json } => {
+            let all = profile::list(state)?;
+            state.save()?;
+            let active = state.profile.as_ref().map(|p| p.name.clone());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("No profiles imported");
+            } else {
+                for p in &all {
+                    let mark = if Some(&p.name) == active.as_ref() {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{mark} {:<24} {}", p.name, p.endpoint);
+                }
+            }
+        }
+        ProfileCommand::Use { name, none } => {
+            if none {
+                state.profile = None;
+                state.save()?;
+                println!("Using the control plane; profiles are kept");
+            } else {
+                let name = name.context("name a profile, or pass --none")?;
+                let p = profile::select(state, &name)?;
+                println!("Connect now uses {}", p.name);
+            }
+        }
+        ProfileCommand::Show { name, json, config } => {
+            let name = name.or_else(|| state.profile.as_ref().map(|p| p.name.clone()));
+            let Some(name) = name else {
+                if json {
+                    println!("null");
+                } else {
+                    println!("No profile imported");
+                }
+                return Ok(());
+            };
+            if config {
+                print!("{}", profile::config_text(state, &name)?);
+                return Ok(());
+            }
+            let all = profile::list(state)?;
+            let p = all
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&name))
+                .with_context(|| format!("no profile named `{name}`"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(p)?);
+            } else {
                 println!("Name:       {}", p.name);
-                println!("Endpoint:   {}", p.endpoint);
+                println!("Public key: {}", p.public_key.as_deref().unwrap_or("-"));
                 println!("Address:    {}", p.address.join(", "));
-                println!("AllowedIPs: {}", p.allowed_ips.join(", "));
                 println!(
                     "DNS:        {}",
                     if p.dns.is_empty() {
@@ -474,12 +714,15 @@ fn profile_command(state: &mut AgentState, command: ProfileCommand) -> anyhow::R
                         p.dns.join(", ")
                     }
                 );
+                for peer in &p.peers {
+                    println!("Peer:       {}", peer.public_key);
+                    println!("  Endpoint:   {}", peer.endpoint.as_deref().unwrap_or("-"));
+                    println!("  AllowedIPs: {}", peer.allowed_ips.join(", "));
+                }
             }
-            None if json => println!("null"),
-            None => println!("No profile imported"),
-        },
-        ProfileCommand::Remove => {
-            profile::remove(state)?;
+        }
+        ProfileCommand::Remove { name } => {
+            profile::remove(state, name.as_deref())?;
             println!("Profile removed");
         }
     }

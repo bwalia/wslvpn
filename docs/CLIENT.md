@@ -7,7 +7,14 @@ independently.
 
 ## Prerequisites
 
-`wg-quick` from the WireGuard tools has to be installed:
+On Windows the tunnel is run by **WireGuard for Windows** (`winget install
+WireGuard.WireGuard`): connect installs the `WireGuardTunnel$wsl` service with
+`wireguard.exe /installtunnelservice`, after one UAC prompt, and disconnect
+removes it. Status reads the service state with `sc query`. Everything below
+about `wg-quick` and bash applies to macOS and Linux. See
+[INSTALL.md](INSTALL.md).
+
+On macOS and Linux, `wg-quick` from the WireGuard tools has to be installed:
 
 ```bash
 brew install wireguard-tools      # macOS
@@ -102,6 +109,33 @@ Three properties come out of that shape:
   process. A local process that watches the loopback request gains nothing. A
   wrong verifier burns the code rather than allowing another attempt.
 
+## Signing in with an OpsAPI account
+
+When the control plane offers it (`wsl sign-in-methods`), you can sign in with
+your OpsAPI email and password instead of the browser:
+
+```bash
+wsl login --opsapi --email alice@example.com
+```
+
+The password is prompted for without echo and sent to OpsAPI — the address
+the control plane advertises, which must be https (or this machine) — never to
+the control plane. If your workspace requires a sign-in code, OpsAPI emails one
+and `login` asks for it. The control plane then checks the OpsAPI session with
+OpsAPI and the directory, and issues its own token; the OpsAPI token is not
+saved. Every `connect` is checked against the directory again. See
+[OPSAPI.md](OPSAPI.md#signing-in-with-an-opsapi-account).
+
+For a program driving the CLI (the desktop app does this), secrets go on stdin
+and never on the command line, where `ps` would show them:
+
+```bash
+printf '%s\n' "$PASSWORD" | wsl login --opsapi --email alice@example.com --stdin --json
+# {"status":"code_required","challenge":"…","email":"alice@example.com"}
+printf '%s\n%s\n' "$CHALLENGE" "$CODE" | wsl login --opsapi --code --stdin --json
+# {"status":"signed_in","email":"alice@example.com","device":"…"}
+```
+
 ## Machine-readable output
 
 `wsl status --json` and `wsl networks --json` emit the same data the human
@@ -115,11 +149,20 @@ it up and down through the same privileged path as a managed session:
 
 ```bash
 wsl profile import ~/Downloads/office.conf
-wsl connect
+wsl profile import ~/Downloads/home.conf
+wsl profile list                 # * marks the one Connect uses
+wsl connect --profile home       # replaces whatever tunnel is up
 wsl status
 wsl disconnect
-wsl profile remove        # back to signing in
+wsl profile show home --config   # the file itself, for editing
+wsl profile remove office
+wsl profile use --none           # use the control plane instead
 ```
+
+Each profile is stored as `<data dir>/profiles/<name>.conf`, mode 0600. One is
+up at a time, as the `wsl` interface; activating another takes the first down
+and brings the second up in one privileged run. A profile imported before
+there was a list is carried into it automatically.
 
 While a profile is imported it is what `connect` uses; `wsl status --json`
 reports `"mode": "direct"`. The file is validated on import, because `wg-quick`
@@ -135,6 +178,24 @@ runs it as root:
 
 The config is stored mode 0600 and its private key is never copied into agent
 state.
+
+### Configs from the official WireGuard apps
+
+A `.conf` exported by the WireGuard apps (macOS, iOS, Windows, Android) or by
+servers such as wg-easy and PiVPN imports as it is: `ListenPort`, `MTU`,
+`PresharedKey`, full-tunnel `AllowedIPs = 0.0.0.0/0, ::/0`, DNS search domains,
+IPv6 endpoints, and extra peers without an `Endpoint` are all accepted. Files
+saved on Windows carry a UTF-8 byte order mark and CRLF line endings; both are
+removed before the file is validated and stored, because `wg-quick` would
+otherwise read the BOM as part of `[Interface]` and ignore every key under it.
+
+Hooks are refused here as they are by the macOS and iOS WireGuard apps.
+
+The official WireGuard app runs its tunnels as macOS network extensions,
+alongside the `wsl` interface rather than through it. `wsl status` (and the
+desktop window) names any tunnel the WireGuard app has connected, because two
+tunnels claiming the same routes is the usual cause of "connected, but nothing
+loads". Disconnect one of them.
 
 ## Choosing the control plane
 

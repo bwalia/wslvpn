@@ -20,4 +20,24 @@ ignore = [
     # Revisit if a MySQL driver is ever enabled, or if `rsa` publishes a fix.
     # Last checked: 2026-09-01.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0367/0368/0369 - `zip` extraction follows symlinks and keeps
+    # SUID bits. zip 3 is only a build-dependency of utoipa-swagger-ui, used to
+    # unpack the pinned Swagger UI bundle when wsl-control is compiled; no zip
+    # code is linked into any binary and no untrusted archive is ever opened.
+    #
+    # Verify with:
+    #   cargo tree --invert --package zip -e normal   # nothing outside [build-dependencies]
+    #
+    # The fix (zip >= 9) arrives with utoipa-swagger-ui 10, which needs the
+    # utoipa 6 migration. Revisit then. Last checked: 2026-10-24.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+
+    # RUSTSEC-2024-0449 - unsafe-libyaml is unmaintained; no vulnerability is
+    # reported. It comes in through serde_yaml, which parses operator-owned
+    # config and policy files only. Revisit when serde_yaml is replaced.
+    # Last checked: 2026-10-24.
+    "RUSTSEC-2024-0449",
 ]

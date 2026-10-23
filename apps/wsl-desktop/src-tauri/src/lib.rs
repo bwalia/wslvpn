@@ -80,20 +80,31 @@ pub fn find_cli() -> Option<PathBuf> {
         let path = PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
+    let name = format!("wsl{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for candidate in [dir.join("wsl"), dir.join("../Resources/wsl")] {
+            for candidate in [dir.join(&name), dir.join("../Resources").join(&name)] {
                 if candidate.is_file() {
                     return Some(candidate);
                 }
             }
         }
     }
+    // On Windows, `wsl.exe` on PATH is Microsoft's Windows Subsystem for
+    // Linux. Running it with our arguments would at best fail confusingly, so
+    // there the bundled copy (or WSL_CLI) is the only one ever used.
+    if cfg!(windows) {
+        return None;
+    }
     search_path("wsl").or_else(|| {
-        ["/opt/homebrew/bin/wsl", "/usr/local/bin/wsl", "/usr/bin/wsl"]
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file())
+        [
+            "/opt/homebrew/bin/wsl",
+            "/usr/local/bin/wsl",
+            "/usr/bin/wsl",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
     })
 }
 
@@ -173,6 +184,71 @@ async fn sign_in() -> Result<serde_json::Value, CliError> {
     status().await
 }
 
+/// Which ways of signing in the configured control plane offers.
+#[tauri::command]
+async fn sign_in_methods() -> Result<serde_json::Value, CliError> {
+    run_json(&["sign-in-methods", "--json"]).await
+}
+
+/// The arguments and stdin for an OpsAPI sign-in. Separate so the test can
+/// check that the password is only ever on stdin: argv is visible to every
+/// user on the machine through `ps`.
+fn opsapi_sign_in_call(email: &str, password: &str) -> (Vec<String>, String) {
+    (
+        vec![
+            "login".into(),
+            "--opsapi".into(),
+            // `=` keeps an address that starts with `-` from being read as a flag.
+            format!("--email={email}"),
+            "--stdin".into(),
+            "--json".into(),
+        ],
+        format!("{password}\n"),
+    )
+}
+
+fn opsapi_code_call(challenge: &str, code: &str) -> (Vec<String>, String) {
+    (
+        vec![
+            "login".into(),
+            "--opsapi".into(),
+            "--code".into(),
+            "--stdin".into(),
+            "--json".into(),
+        ],
+        format!("{challenge}\n{code}\n"),
+    )
+}
+
+async fn run_call(call: (Vec<String>, String)) -> Result<serde_json::Value, CliError> {
+    let (args, input) = call;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stdout = run_with_input(&args, Some(&input)).await?;
+    // The last line is the outcome; anything before it is progress.
+    let last = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    serde_json::from_str(last)
+        .map_err(|e| CliError::bad_output(format!("could not read the CLI's output: {e}")))
+}
+
+/// Sign in with an OpsAPI account. Returns `{"status":"code_required",
+/// "challenge", "email"}` when OpsAPI emailed a code, else `signed_in`.
+#[tauri::command]
+async fn opsapi_sign_in(email: String, password: String) -> Result<serde_json::Value, CliError> {
+    run_call(opsapi_sign_in_call(&email, &password)).await
+}
+
+#[tauri::command]
+async fn opsapi_verify_code(
+    challenge: String,
+    code: String,
+) -> Result<serde_json::Value, CliError> {
+    run_call(opsapi_code_call(&challenge, &code)).await
+}
+
 #[tauri::command]
 async fn sign_out() -> Result<serde_json::Value, CliError> {
     run(&["logout"]).await?;
@@ -215,9 +291,44 @@ async fn import_profile(text: String, name: String) -> Result<serde_json::Value,
     status().await
 }
 
+/// Delete a tunnel. `--` keeps a name from ever being read as a flag.
 #[tauri::command]
-async fn remove_profile() -> Result<serde_json::Value, CliError> {
-    run(&["profile", "remove"]).await?;
+async fn remove_profile(name: Option<String>) -> Result<serde_json::Value, CliError> {
+    match name.as_deref() {
+        Some(n) => run(&["profile", "remove", "--", n]).await?,
+        None => run(&["profile", "remove"]).await?,
+    };
+    status().await
+}
+
+/// Bring a tunnel up, replacing whichever one is up now.
+#[tauri::command]
+async fn activate_profile(name: String) -> Result<serde_json::Value, CliError> {
+    let flag = format!("--profile={name}");
+    run(&["connect", "--gui", &flag]).await?;
+    status().await
+}
+
+/// A tunnel's config file, for Edit. It holds the private key, which is why
+/// it is read only when someone asks to edit, and never kept by the window.
+#[tauri::command]
+async fn profile_config(name: String) -> Result<String, CliError> {
+    run(&["profile", "show", "--config", "--", &name]).await
+}
+
+/// Save an edited config over the tunnel of the same name. Validated by the
+/// CLI exactly as an import is; on stdin, like an import.
+#[tauri::command]
+async fn save_profile(name: String, text: String) -> Result<serde_json::Value, CliError> {
+    let flag = format!("--name={name}");
+    run_with_input(&["profile", "import", &flag, "-"], Some(&text)).await?;
+    status().await
+}
+
+/// Stop using imported tunnels for Connect, and use the control plane.
+#[tauri::command]
+async fn use_control_plane() -> Result<serde_json::Value, CliError> {
+    run(&["profile", "use", "--none"]).await?;
     status().await
 }
 
@@ -266,12 +377,19 @@ pub fn run_app() {
             status,
             networks,
             sign_in,
+            sign_in_methods,
+            opsapi_sign_in,
+            opsapi_verify_code,
             sign_out,
             connect,
             disconnect,
             set_control_url,
             import_profile,
             remove_profile,
+            activate_profile,
+            profile_config,
+            save_profile,
+            use_control_plane,
             dns_status,
             dns_set,
             dns_remove,
@@ -311,6 +429,7 @@ mod tests {
 
     /// A stand-in CLI that echoes its argv and stdin, to check what the
     /// commands actually hand it.
+    #[cfg(unix)]
     fn fake_cli() -> PathBuf {
         let path = std::env::temp_dir().join(format!("wsl-desktop-fake-{}", std::process::id()));
         std::fs::write(
@@ -324,6 +443,7 @@ mod tests {
     }
 
     /// One test, because CLI_ENV is process-wide and tests run in parallel.
+    #[cfg(unix)]
     #[test]
     fn the_cli_gets_argv_and_stdin_exactly() {
         let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -351,6 +471,20 @@ mod tests {
 
         std::env::remove_var(CLI_ENV);
         let _ = std::fs::remove_file(cli);
+    }
+
+    #[test]
+    fn opsapi_secrets_go_on_stdin_never_in_argv() {
+        let (args, input) = opsapi_sign_in_call("-alice@example.com", "s3cret pw");
+        assert!(args.iter().all(|a| !a.contains("s3cret")), "{args:?}");
+        assert!(args.contains(&"--email=-alice@example.com".to_string()));
+        assert_eq!(input, "s3cret pw\n");
+
+        let (args, input) = opsapi_code_call("challenge-token", "123456");
+        assert!(args
+            .iter()
+            .all(|a| !a.contains("challenge-token") && !a.contains("123456")));
+        assert_eq!(input, "challenge-token\n123456\n");
     }
 
     #[test]

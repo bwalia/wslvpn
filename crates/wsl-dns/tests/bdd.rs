@@ -20,6 +20,11 @@ struct Dns {
     dir: Option<PathBuf>,
     isp: Vec<(String, IpAddr)>,
     isp_down: bool,
+    /// The down ISP: bound for the whole scenario and never read. Binding and
+    /// dropping a socket to find a free port let the OS hand that port to the
+    /// client's next query socket, and the resolver then forwarded the lookup
+    /// straight back to the client — which read a query as its "response".
+    isp_sink: Option<std::net::UdpSocket>,
     isp_task: Option<JoinHandle<()>>,
     isp_addr: Option<SocketAddr>,
     ours: Overrides,
@@ -75,10 +80,10 @@ impl Dns {
             return addr;
         }
         let upstream = if self.isp_down {
-            // A port nothing listens on: the upstream exists but never answers.
+            // The upstream exists but never answers.
             let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             let addr = socket.local_addr().unwrap();
-            drop(socket);
+            self.isp_sink = Some(socket);
             addr
         } else {
             let isp_hosts = self.dir().join("isp-hosts");

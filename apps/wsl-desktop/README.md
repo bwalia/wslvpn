@@ -12,7 +12,7 @@ cd apps/wsl-desktop
 make test     # view logic (node --test) + the CLI bridge (cargo test, clippy)
 make dev      # a window over a debug build of the CLI
 make app      # release bundle, with the CLI inside it
-open "src-tauri/target/release/bundle/macos/WSL Zero Trust.app"
+open src-tauri/target/release/bundle/macos/WSLZeroTrust.app
 ```
 
 The Mac needs the WireGuard tools and a bash new enough to run `wg-quick`:
@@ -39,14 +39,25 @@ WSL_CLI=$PWD/../../target/debug/wsl npm run tauri dev
 
 ## Connecting
 
-The first screen offers two ways in:
+The first screen offers these ways in:
 
-- **Sign in** — enter the control plane's URL (`https`, or `http` to this
-  machine only) and sign in through its identity provider in the browser.
+- **Sign in with browser** — enter the control plane's URL (`https`, or `http`
+  to this machine only) and sign in through its identity provider.
+- **Sign in with OpsAPI** — shown only when the control plane offers it
+  (`wsl sign-in-methods`). Email and password go to OpsAPI through the CLI's
+  stdin, never its arguments; if OpsAPI emails a code, the window asks for it.
+  The control plane checks the session with OpsAPI and SCIM, and checks SCIM
+  again on every Connect.
 - **Import WireGuard config…** — pick the `.conf` your administrator issued.
   The app connects straight to that WireGuard server; no control plane is
   involved. Configs with `PostUp`/`PreUp`/`PostDown`/`PreDown` are refused,
-  because `wg-quick` would run those commands as root.
+  because `wg-quick` would run those commands as root. Files exported by the
+  official WireGuard apps import unchanged; a Windows byte order mark and CRLF
+  line endings are removed.
+
+If the official WireGuard app has a tunnel connected at the same time, the
+dashboard names it: two tunnels routing the same addresses is the usual reason
+a connection carries no traffic.
 
 Connect and Disconnect show the macOS administrator dialog: bringing an
 interface up needs root, and the app itself never has it.
@@ -81,17 +92,23 @@ asks macOS for the privilege through its own authorization dialog. Only
 
 ## What it shows
 
-| Field | Source |
-| --- | --- |
-| Profile, Control plane | `wsl status --json` (`mode`, `profile`, `control_url`) |
-| Signed in as, Device, Identity, Posture | `wsl status --json` |
-| DNS overrides | `wsl dns status --json` |
-| Interface | the `utun` the OS reports, or "Down" |
-| Networks | one row per network, with the agent's own state string |
-| Gateway, Session expires | shown only when there is a session |
+The window is laid out like the WireGuard app's "Manage Tunnels": every
+imported tunnel on the left, with a dot that is green only while its interface
+is up; the selected one on the right — interface, status, public key,
+addresses, DNS, MTU, and each peer with its endpoint, allowed IPs and
+keepalive — with **Activate** / **Deactivate** and **Edit**.
 
-A session record and a live interface are separate things, so the UI keeps them
-separate: `Session open, tunnel down` is a state a user needs to see, not a
-rounding error. The status dot pulses only when an interface is actually up.
+- **+** imports one or more `.conf` files; **−** removes the selected tunnel
+  (after asking; the tunnel that is up cannot be removed).
+- One tunnel is up at a time. Activating another replaces it in a single
+  administrator prompt.
+- **Edit** opens the config text, private key included, and saves it through
+  the same validation as an import. Renaming is done here too.
+- **Organisation sign-in**, **DNS overrides** and **Device posture** are their
+  own entries below the tunnel list.
+
+Everything shown comes from `wsl status --json` (`profiles`, `profile`,
+`interface`), so the window cannot disagree with `wsl profile list` and
+`wsl status` in a terminal.
 
 State refreshes every five seconds, and after every action.

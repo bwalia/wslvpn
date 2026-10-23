@@ -7,123 +7,191 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main id="app">
-      <!-- Nothing is shown until the first status read comes back. The old UI
-           rendered a signed-out screen immediately and then corrected itself,
-           which read as a sign-out to anyone who was already connected. -->
-      <section id="loading" class="panel">
-        <h1>WSL Zero Trust</h1>
-        <p>Reading agent status…</p>
-      </section>
+    <!-- Nothing is shown until the first status read comes back: rendering a
+         default first, then correcting it, reads as a disconnect. -->
+    <section id="loading" class="centered">
+      <p>Reading agent status…</p>
+    </section>
 
-      <!-- Two ways in: sign in to a control plane, or use a WireGuard config
-           an administrator handed out. The second needs no server of ours. -->
-      <section id="signed-out" class="panel" hidden>
-        <h1>WSL Zero Trust</h1>
-        <p>Secure access to your organisation's services.</p>
+    <section id="no-cli" class="centered" hidden>
+      <h1>Command-line tool not found</h1>
+      <p id="no-cli-message">
+        The app drives the <code>wsl</code> command-line tool and could not find it.
+      </p>
+      <button id="retry">Try again</button>
+    </section>
 
-        <form id="sign-in-form" class="stack">
-          <label class="field">
-            <span>Control plane</span>
-            <input id="control-url" type="url" required spellcheck="false"
-                   autocomplete="url" placeholder="https://vpn.example.com" />
-          </label>
-          <button id="sign-in" type="submit">Sign in</button>
-        </form>
-        <p class="hint" id="sign-in-hint" hidden>
-          A browser window is open. Finish signing in there.
-        </p>
+    <!-- Laid out like the WireGuard app: tunnels on the left, the selected one
+         on the right, one tunnel active at a time. -->
+    <main id="app" class="layout" hidden>
+      <aside class="sidebar">
+        <ul id="tunnel-list" class="list" role="listbox" aria-label="Tunnels"></ul>
 
-        <div class="divider"><span>or</span></div>
-
-        <p class="hint">Have a WireGuard config file from your administrator?</p>
-        <!-- The input sits outside its label: the busy state rewrites the
-             label's text, which would otherwise delete the input with it. -->
-        <input id="import-file" type="file" accept=".conf,text/plain" hidden />
-        <label class="button secondary" id="import-label" for="import-file"
-               tabindex="0" role="button">Import WireGuard config…</label>
-
-        <p class="error" id="signed-out-error" role="alert" hidden></p>
-      </section>
-
-      <section id="dashboard" class="panel" hidden>
-        <header>
-          <h1>
-            WSL Zero Trust
-            <span id="dot" class="dot down" aria-hidden="true"></span>
-            <span id="tunnel-state" class="state" aria-live="polite">—</span>
-          </h1>
-        </header>
-
-        <dl class="facts">
-          <dt id="profile-label">Profile</dt>
-          <dd id="profile">—</dd>
-          <dt id="controlUrl-label">Control plane</dt>
-          <dd id="controlUrl">—</dd>
-          <dt id="email-label">Signed in as</dt>
-          <dd id="email">—</dd>
-          <dt id="device-label">Device</dt>
-          <dd id="device">—</dd>
-          <dt id="identity-label">Identity</dt>
-          <dd id="identity">—</dd>
-          <dt id="posture-label">Posture</dt>
-          <dd id="posture">—</dd>
-          <dt id="interface-label">Interface</dt>
-          <dd id="interface">—</dd>
-          <dt id="gateway-label" hidden>Server</dt>
-          <dd id="gateway" hidden>—</dd>
-          <dt id="expires-label" hidden>Session expires</dt>
-          <dd id="expires" hidden>—</dd>
-        </dl>
-
-        <div class="actions">
-          <label class="field" id="network-field" hidden>
-            <span>Network</span>
-            <select id="network-choice"></select>
-          </label>
-          <button id="connect">Connect</button>
-          <button id="disconnect" class="secondary" hidden>Disconnect</button>
-          <button id="leave" class="quiet">Sign out</button>
-        </div>
-        <p class="error" id="dashboard-error" role="alert" hidden></p>
-
-        <h2>Networks</h2>
-        <ul id="networks">
-          <li class="empty"><span>No networks</span></li>
+        <ul id="section-list" class="list sections" role="listbox" aria-label="More">
+          <li role="option" data-select="section:organisation">Organisation sign-in</li>
+          <li role="option" data-select="section:dns">DNS overrides</li>
+          <li role="option" data-select="section:posture">Device posture</li>
         </ul>
 
-        <h2 class="with-state">
-          DNS overrides
-          <span id="dns-summary" class="muted"></span>
-        </h2>
-        <p class="hint">
-          Names here resolve to the address you give, whatever your ISP's DNS
-          says — like <code>/etc/hosts</code>, with <code>*.</code> wildcards.
-        </p>
-        <ul id="dns-entries"></ul>
-        <form id="dns-add" class="inline" autocomplete="off">
-          <input id="dns-name" spellcheck="false" aria-label="Host name"
-                 placeholder="intranet.example.com" />
-          <input id="dns-address" spellcheck="false" aria-label="Address"
-                 placeholder="10.0.0.5" />
-          <button type="submit" class="secondary">Add</button>
-        </form>
-        <div class="actions">
-          <button id="dns-toggle" class="secondary" hidden>Turn on</button>
+        <div class="toolbar">
+          <!-- The input sits outside its label: the busy state rewrites the
+               label's text, which would otherwise delete the input with it. -->
+          <input id="import-file" type="file" accept=".conf,text/plain" multiple hidden />
+          <label id="import-label" for="import-file" class="tool" tabindex="0" role="button"
+                 title="Import tunnel(s) from file">+</label>
+          <button id="remove-tunnel" class="tool" title="Remove selected tunnel"
+                  aria-label="Remove selected tunnel">−</button>
         </div>
-        <p class="error" id="dns-error" role="alert" hidden></p>
+      </aside>
 
-        <h2>Posture</h2>
-        <ul id="posture-signals"></ul>
-      </section>
+      <section class="detail">
+        <p class="error" id="app-error" role="alert" hidden></p>
+        <p class="warn" id="other-vpn" role="status" hidden></p>
 
-      <section id="no-cli" class="panel" hidden>
-        <h1>Command-line tool not found</h1>
-        <p id="no-cli-message">
-          The desktop app drives the <code>wsl</code> command-line tool and could
-          not find it.
-        </p>
-        <button id="retry">Try again</button>
+        <div id="confirm-remove" class="confirm" role="alertdialog" hidden>
+          <span id="confirm-remove-text"></span>
+          <button id="confirm-remove-yes">Remove</button>
+          <button id="confirm-remove-no" class="secondary">Cancel</button>
+        </div>
+
+        <!-- One tunnel -->
+        <div id="tunnel-panel" class="panel" hidden>
+          <div class="card">
+            <dl class="grid" id="tunnel-interface">
+              <dt class="strong">Interface:</dt><dd id="tunnel-title"></dd>
+              <dt>Status:</dt>
+              <dd><span id="tunnel-dot" class="dot"></span><span id="tunnel-status"></span></dd>
+            </dl>
+            <dl class="grid" id="tunnel-rows"></dl>
+            <div class="grid-actions">
+              <button id="tunnel-action">Activate</button>
+            </div>
+            <div id="tunnel-peers"></div>
+          </div>
+          <div class="footer">
+            <button id="tunnel-edit" class="secondary">Edit</button>
+          </div>
+        </div>
+
+        <!-- Editing a tunnel's config, as the WireGuard app does -->
+        <div id="edit-panel" class="panel" hidden>
+          <label class="field">
+            <span>Name</span>
+            <input id="edit-name" spellcheck="false" />
+          </label>
+          <textarea id="edit-text" spellcheck="false" autocomplete="off"
+                    aria-label="WireGuard configuration"></textarea>
+          <p class="hint">
+            The private key is in this text. It is saved only to this Mac, readable
+            by you alone. <code>PostUp</code>-style commands are refused.
+          </p>
+          <div class="footer">
+            <button id="edit-cancel" class="secondary">Discard</button>
+            <button id="edit-save">Save</button>
+          </div>
+        </div>
+
+        <!-- No tunnels yet -->
+        <div id="empty-panel" class="panel centered-panel" hidden>
+          <h1>No tunnels yet</h1>
+          <p>Import the <code>.conf</code> file your WireGuard server's administrator
+             gave you, or sign in to your organisation.</p>
+          <label class="button" for="import-file">Import tunnel(s) from file…</label>
+        </div>
+
+        <!-- Signing in to a control plane, and its managed networks -->
+        <div id="organisation-panel" class="panel" hidden>
+          <div id="signed-out" class="stack">
+            <h1>Sign in to your organisation</h1>
+            <form id="sign-in-form" class="stack">
+              <label class="field">
+                <span>Control plane</span>
+                <input id="control-url" type="url" required spellcheck="false"
+                       autocomplete="url" placeholder="https://vpn.example.com" />
+              </label>
+              <button id="sign-in" type="submit">Sign in with browser</button>
+            </form>
+            <p class="hint" id="sign-in-hint" hidden>
+              A browser window is open. Finish signing in there.
+            </p>
+
+            <!-- Shown only when the control plane offers it. The password goes
+                 to OpsAPI through the CLI's stdin; the control plane never sees it. -->
+            <form id="opsapi-form" class="stack" hidden>
+              <p class="hint" id="opsapi-hint"></p>
+              <label class="field">
+                <span>Email</span>
+                <input id="opsapi-email" type="email" spellcheck="false" autocomplete="username" />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="opsapi-password" type="password" autocomplete="current-password" />
+              </label>
+              <button id="opsapi-submit" type="submit" class="secondary">Sign in with OpsAPI</button>
+            </form>
+
+            <form id="code-form" class="stack" hidden autocomplete="off">
+              <p class="hint" id="code-prompt"></p>
+              <label class="field">
+                <span>Code</span>
+                <input id="opsapi-code" inputmode="numeric" spellcheck="false"
+                       autocomplete="one-time-code" />
+              </label>
+              <button id="code-submit" type="submit">Verify</button>
+              <button id="code-cancel" type="button" class="quiet">Start again</button>
+            </form>
+          </div>
+
+          <div id="signed-in" class="stack" hidden>
+            <dl class="grid">
+              <dt>Control plane:</dt><dd id="controlUrl">—</dd>
+              <dt>Signed in as:</dt><dd id="email">—</dd>
+              <dt>Device:</dt><dd id="device">—</dd>
+              <dt>Status:</dt><dd><span id="org-dot" class="dot"></span><span id="org-state">—</span></dd>
+              <dt id="gateway-label" hidden>Gateway:</dt><dd id="gateway" hidden>—</dd>
+              <dt id="expires-label" hidden>Session expires:</dt><dd id="expires" hidden>—</dd>
+            </dl>
+            <label class="field" id="network-field" hidden>
+              <span>Network</span>
+              <select id="network-choice"></select>
+            </label>
+            <div class="row">
+              <button id="org-connect">Connect</button>
+              <button id="org-disconnect" class="secondary" hidden>Disconnect</button>
+              <button id="sign-out" class="quiet">Sign out</button>
+            </div>
+            <h2>Networks</h2>
+            <ul id="networks" class="rows"></ul>
+          </div>
+        </div>
+
+        <!-- DNS overrides -->
+        <div id="dns-panel" class="panel" hidden>
+          <h1 class="with-state">DNS overrides <span id="dns-summary" class="muted"></span></h1>
+          <p class="hint">
+            Names here resolve to the address you give, whatever your ISP's DNS says —
+            like <code>/etc/hosts</code>, with <code>*.</code> wildcards.
+          </p>
+          <ul id="dns-entries" class="rows"></ul>
+          <form id="dns-add" class="inline" autocomplete="off">
+            <input id="dns-name" spellcheck="false" aria-label="Host name"
+                   placeholder="intranet.example.com" />
+            <input id="dns-address" spellcheck="false" aria-label="Address"
+                   placeholder="10.0.0.5" />
+            <button type="submit" class="secondary">Add</button>
+          </form>
+          <div class="row">
+            <button id="dns-toggle" class="secondary" hidden>Turn on</button>
+          </div>
+          <p class="error" id="dns-error" role="alert" hidden></p>
+        </div>
+
+        <!-- Posture -->
+        <div id="posture-panel" class="panel" hidden>
+          <h1>Device posture <span id="posture" class="muted"></span></h1>
+          <p class="hint">What this Mac reports when it asks a control plane for access.</p>
+          <ul id="posture-signals" class="rows"></ul>
+        </div>
       </section>
     </main>
     <script type="module" src="/main.js"></script>

@@ -34,7 +34,7 @@ dev: deps
 	WSL_CLI=$(ROOT)/target/debug/wsl npx tauri dev
 
 app: deps cli
-	npx tauri build
+	npx tauri build --bundles app
 
 dmg: deps cli
 	npx tauri build --bundles dmg
