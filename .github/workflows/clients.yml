@@ -98,7 +98,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/wsl${ext}" \
              "apps/wsl-desktop/src-tauri/binaries/wsl-${{ matrix.target }}${ext}"
 
+      # Run natively only: in the Intel-on-Apple-silicon cross-build the host
+      # test binary would look for an arm64 CLI next to it. The arm64 job runs
+      # the same tests.
       - name: bridge tests
+        if: matrix.label != 'macos-x64'
         working-directory: apps/wsl-desktop/src-tauri
         run: cargo test
 
