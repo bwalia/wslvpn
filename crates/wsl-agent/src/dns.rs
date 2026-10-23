@@ -134,9 +134,16 @@ fn unsupported() -> anyhow::Error {
     )
 }
 
+#[cfg(unix)]
 fn gui_domain() -> String {
     // SAFETY: getuid cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })
+}
+
+/// launchd exists only on macOS; [`supported`] keeps this from being reached.
+#[cfg(not(unix))]
+fn gui_domain() -> String {
+    String::new()
 }
 
 async fn launchctl(args: &[&str]) -> Result<std::process::Output> {

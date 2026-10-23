@@ -12,9 +12,17 @@
 //! a terminal. When neither is possible the error says exactly what to run
 //! instead of failing somewhere deep inside a shell script.
 
+// The wg-quick path below is compiled everywhere so its planning stays
+// testable on every platform; on Windows the tunnel goes through
+// `wireguard.exe` instead and that path is simply not called.
+#![cfg_attr(windows, allow(dead_code))]
+
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+
+#[path = "tunnel_windows.rs"]
+pub mod windows;
 
 /// The interface name. `wg-quick` derives it from the config file's basename,
 /// so the config has to be written as `<INTERFACE>.conf` for the two to agree.
@@ -108,9 +116,16 @@ fn search_path(binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+#[cfg(unix)]
 fn is_root() -> bool {
     // SAFETY: geteuid is always safe to call and cannot fail.
     unsafe { libc::geteuid() == 0 }
+}
+
+/// Windows has no root; elevation is handled in [`windows`].
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
 }
 
 /// What a caller is able to do about not being root.
@@ -397,22 +412,48 @@ pub async fn up(conf: &Path, escalation: Escalation) -> Result<TunnelState> {
 /// [`up`], naming a different way out when there is no privilege to be had.
 pub async fn up_with_hint(conf: &Path, escalation: Escalation, hint: &str) -> Result<TunnelState> {
     ensure_conf(conf)?;
-    let wg = WgQuick::locate()?;
-    let mut steps = Vec::new();
-    if state().is_up() {
-        steps.push(wg.step(Action::Down, conf));
+    #[cfg(windows)]
+    {
+        let _ = hint;
+        let exe = windows::find_wireguard_exe().ok_or_else(windows::not_installed)?;
+        let mut steps = Vec::new();
+        if state().is_up() {
+            steps.push(windows::step(&exe, Action::Down, conf));
+        }
+        steps.push(windows::step(&exe, Action::Up, conf));
+        windows::run::run(&steps, escalation, WINDOWS_HINT).await?;
+        let state = windows::run::wait_until_up().await;
+        if !state.is_up() {
+            bail!(
+                "wireguard.exe reported success but the WireGuardTunnel$wsl service is \
+                 not running. Open the WireGuard app for its log."
+            );
+        }
+        return Ok(state);
     }
-    steps.push(wg.step(Action::Up, conf));
-    run_privileged(&steps, &wg.path(), escalation, hint).await?;
-    let state = state();
-    if !state.is_up() {
-        bail!(
-            "wg-quick reported success but no interface appeared. \
+    #[cfg(not(windows))]
+    {
+        let wg = WgQuick::locate()?;
+        let mut steps = Vec::new();
+        if state().is_up() {
+            steps.push(wg.step(Action::Down, conf));
+        }
+        steps.push(wg.step(Action::Up, conf));
+        run_privileged(&steps, &wg.path(), escalation, hint).await?;
+        let state = state();
+        if !state.is_up() {
+            bail!(
+                "wg-quick reported success but no interface appeared. \
              Check `wg show` and the system log."
-        );
+            );
+        }
+        Ok(state)
     }
-    Ok(state)
 }
+
+/// What to do on Windows when elevation cannot be asked for.
+#[cfg(windows)]
+const WINDOWS_HINT: &str = "Run the command from a terminal opened with \"Run as administrator\".";
 
 /// Tear the interface down. Already-down is success, not an error: a user who
 /// runs `disconnect` twice wants the tunnel gone, and it is.
@@ -420,16 +461,29 @@ pub async fn down(conf: &Path, escalation: Escalation) -> Result<()> {
     if !state().is_up() {
         return Ok(());
     }
-    ensure_conf(conf)?;
-    let wg = WgQuick::locate()?;
-    let steps = [wg.step(Action::Down, conf)];
-    run_privileged(
-        &steps,
-        &wg.path(),
-        escalation,
-        &unavailable_hint(Action::Down),
-    )
-    .await
+    #[cfg(windows)]
+    {
+        let exe = windows::find_wireguard_exe().ok_or_else(windows::not_installed)?;
+        windows::run::run(
+            &[windows::step(&exe, Action::Down, conf)],
+            escalation,
+            WINDOWS_HINT,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        ensure_conf(conf)?;
+        let wg = WgQuick::locate()?;
+        let steps = [wg.step(Action::Down, conf)];
+        run_privileged(
+            &steps,
+            &wg.path(),
+            escalation,
+            &unavailable_hint(Action::Down),
+        )
+        .await
+    }
 }
 
 fn ensure_conf(conf: &Path) -> Result<()> {
@@ -538,6 +592,11 @@ pub fn explain_graphical_failure(what: &str, stderr: &str) -> String {
 /// This deliberately avoids `wg show`, which needs root: a user should be able
 /// to run `wsl status` without a password prompt and still get the truth.
 pub fn state() -> TunnelState {
+    #[cfg(windows)]
+    {
+        windows::run::state()
+    }
+    #[cfg(not(windows))]
     match resolved_interface() {
         Some(interface) if interface_exists(&interface) => TunnelState::Up { interface },
         _ => TunnelState::Down,
@@ -587,15 +646,22 @@ fn interface_exists(name: &str) -> bool {
 /// nothing works". Naming the other tunnel is the useful thing to do; stopping
 /// it is the user's call, so this only reports.
 pub fn other_wireguard_tunnels() -> Vec<String> {
-    if !cfg!(target_os = "macos") {
-        return Vec::new();
+    #[cfg(windows)]
+    {
+        windows::run::other_tunnels()
     }
-    std::process::Command::new("/usr/sbin/scutil")
-        .args(["--nc", "list"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|out| parse_nc_list(&String::from_utf8_lossy(&out.stdout)))
-        .unwrap_or_default()
+    #[cfg(not(windows))]
+    {
+        if !cfg!(target_os = "macos") {
+            return Vec::new();
+        }
+        std::process::Command::new("/usr/sbin/scutil")
+            .args(["--nc", "list"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|out| parse_nc_list(&String::from_utf8_lossy(&out.stdout)))
+            .unwrap_or_default()
+    }
 }
 
 /// The names of connected WireGuard-app services in `scutil --nc list`.

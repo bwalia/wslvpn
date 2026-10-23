@@ -80,14 +80,21 @@ pub fn find_cli() -> Option<PathBuf> {
         let path = PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
+    let name = format!("wsl{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for candidate in [dir.join("wsl"), dir.join("../Resources/wsl")] {
+            for candidate in [dir.join(&name), dir.join("../Resources").join(&name)] {
                 if candidate.is_file() {
                     return Some(candidate);
                 }
             }
         }
+    }
+    // On Windows, `wsl.exe` on PATH is Microsoft's Windows Subsystem for
+    // Linux. Running it with our arguments would at best fail confusingly, so
+    // there the bundled copy (or WSL_CLI) is the only one ever used.
+    if cfg!(windows) {
+        return None;
     }
     search_path("wsl").or_else(|| {
         [
@@ -383,6 +390,7 @@ mod tests {
 
     /// A stand-in CLI that echoes its argv and stdin, to check what the
     /// commands actually hand it.
+    #[cfg(unix)]
     fn fake_cli() -> PathBuf {
         let path = std::env::temp_dir().join(format!("wsl-desktop-fake-{}", std::process::id()));
         std::fs::write(
@@ -396,6 +404,7 @@ mod tests {
     }
 
     /// One test, because CLI_ENV is process-wide and tests run in parallel.
+    #[cfg(unix)]
     #[test]
     fn the_cli_gets_argv_and_stdin_exactly() {
         let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());

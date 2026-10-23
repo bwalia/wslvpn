@@ -7,7 +7,14 @@ independently.
 
 ## Prerequisites
 
-`wg-quick` from the WireGuard tools has to be installed:
+On Windows the tunnel is run by **WireGuard for Windows** (`winget install
+WireGuard.WireGuard`): connect installs the `WireGuardTunnel$wsl` service with
+`wireguard.exe /installtunnelservice`, after one UAC prompt, and disconnect
+removes it. Status reads the service state with `sc query`. Everything below
+about `wg-quick` and bash applies to macOS and Linux. See
+[INSTALL.md](INSTALL.md).
+
+On macOS and Linux, `wg-quick` from the WireGuard tools has to be installed:
 
 ```bash
 brew install wireguard-tools      # macOS

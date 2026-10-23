@@ -315,6 +315,15 @@ fn hostname() -> String {
 /// Ask the kernel. `/etc/hostname` does not exist on macOS and `HOSTNAME` is
 /// a shell variable a GUI-launched process never sees, which is how every Mac
 /// used to register as "unknown-device".
+#[cfg(not(unix))]
+fn hostname_impl() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .map(|name| display_hostname(&name))
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(unix)]
 fn hostname_impl() -> Option<String> {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; gethostname NUL-terminates
