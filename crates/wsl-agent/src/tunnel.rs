@@ -618,8 +618,81 @@ fn resolved_interface() -> Option<String> {
             let name = contents.trim();
             (!name.is_empty()).then(|| name.to_string())
         }
+        // Current wg-quick on macOS writes the file 0400 root. The tunnel is
+        // ours if a utun wg-quick made carries the address our config gave it.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let conf = crate::state::AgentState::wg_conf_path()
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            pick_interface(
+                &socket_interfaces(&run_dir),
+                &conf_addresses(&conf),
+                ifconfig_output,
+            )
+        }
         Err(_) => Some(INTERFACE.to_string()),
     }
+}
+
+/// The interfaces wg-quick is serving: it leaves `<utun>.sock` for each in its
+/// run directory, which (unlike `wsl.name`) anyone may list.
+fn socket_interfaces(run_dir: &Path) -> Vec<String> {
+    std::fs::read_dir(run_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()
+                        .and_then(|n| n.strip_suffix(".sock"))
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The interface addresses in a wg-quick config, without their prefixes.
+fn conf_addresses(conf: &str) -> Vec<String> {
+    conf.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split('#').next()?.split_once('=')?;
+            key.trim().eq_ignore_ascii_case("address").then_some(value)
+        })
+        .flat_map(|value| value.split(','))
+        .filter_map(|a| a.trim().split('/').next().map(str::to_string))
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// The first candidate whose `ifconfig` shows one of `addresses`, matched as a
+/// whole word so `10.8.0.18` never matches `10.8.0.180`.
+fn pick_interface(
+    candidates: &[String],
+    addresses: &[String],
+    ifconfig: impl Fn(&str) -> String,
+) -> Option<String> {
+    candidates.iter().find_map(|name| {
+        let out = ifconfig(name);
+        let words: Vec<&str> = out.split_whitespace().collect();
+        let ours = words.windows(2).any(|w| {
+            (w[0] == "inet" || w[0] == "inet6")
+                && addresses
+                    .iter()
+                    .any(|a| w[1].split('%').next() == Some(a.as_str()))
+        });
+        ours.then(|| name.clone())
+    })
+}
+
+fn ifconfig_output(name: &str) -> String {
+    std::process::Command::new("ifconfig")
+        .arg(name)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 fn interface_exists(name: &str) -> bool {
@@ -686,6 +759,51 @@ pub fn parse_nc_list(output: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// wg-quick on current macOS writes `wsl.name` mode 0400 root, so a user
+    /// cannot read which `utun` is ours. The tunnel is still found: by the
+    /// sockets wg-quick leaves in the run directory, and the address our own
+    /// config gave the interface.
+    #[test]
+    fn our_interface_is_found_by_its_address_when_the_name_file_is_root_only() {
+        let conf = "[Interface]\nPrivateKey = k\nAddress = 10.8.0.18/32, fd00::12/128\nMTU = 1280\n\n[Peer]\nAllowedIPs = 10.8.0.0/24\n";
+        assert_eq!(conf_addresses(conf), vec!["10.8.0.18", "fd00::12"]);
+        let ifconfig = |name: &str| match name {
+            "utun3" => {
+                "utun3: flags=8051<UP>\n\tinet 100.64.0.2 --> 100.64.0.2 netmask 0xffffffff\n"
+                    .to_string()
+            }
+            "utun14" => {
+                "utun14: flags=8051<UP>\n\tinet 10.8.0.18 --> 10.8.0.18 netmask 0xffffffff\n"
+                    .to_string()
+            }
+            _ => String::new(),
+        };
+        let candidates = vec!["utun3".to_string(), "utun14".to_string()];
+        assert_eq!(
+            pick_interface(&candidates, &conf_addresses(conf), ifconfig),
+            Some("utun14".to_string())
+        );
+        // Another tunnel's address that merely starts the same is not ours.
+        let other = |_: &str| "\tinet 10.8.0.180 --> 10.8.0.180\n".to_string();
+        assert_eq!(
+            pick_interface(&candidates, &conf_addresses(conf), other),
+            None
+        );
+    }
+
+    #[test]
+    fn sockets_in_the_run_directory_name_the_candidates() {
+        let dir = std::env::temp_dir().join(format!("wsl-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["utun14.sock", "utun3.sock", "wsl.name", "notes.txt"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let mut found = socket_interfaces(&dir);
+        found.sort();
+        assert_eq!(found, vec!["utun14", "utun3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn connected_wireguard_app_tunnels_are_named_and_others_ignored() {
