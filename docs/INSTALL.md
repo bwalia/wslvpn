@@ -17,7 +17,7 @@ your platform, the stand-alone CLI, and `SHA256SUMS`.
 brew install wireguard-tools bash
 ```
 
-Open `WSL Zero Trust_<version>_aarch64.dmg` (Apple silicon) or `_x64.dmg`
+Open `WSLZeroTrust_<version>_aarch64.dmg` (Apple silicon) or `_x64.dmg`
 (Intel) and drag the app to Applications. Connect asks for an administrator
 password through the system dialog each time; the app itself never runs as
 root.
@@ -32,7 +32,7 @@ sudo apt install wireguard-tools policykit-1    # Debian / Ubuntu
 sudo dnf install wireguard-tools polkit          # Fedora
 ```
 
-Install `wsl-zero-trust_<version>_amd64.deb`, or run the `.AppImage`. Connect
+Install `wslzerotrust_<version>_amd64.deb`, or run the `.AppImage`. Connect
 asks for privilege through polkit (`pkexec`). From a terminal, `wsl connect`
 uses `sudo`.
 

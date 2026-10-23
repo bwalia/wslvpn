@@ -12,7 +12,7 @@ cd apps/wsl-desktop
 make test     # view logic (node --test) + the CLI bridge (cargo test, clippy)
 make dev      # a window over a debug build of the CLI
 make app      # release bundle, with the CLI inside it
-open "src-tauri/target/release/bundle/macos/WSL Zero Trust.app"
+open src-tauri/target/release/bundle/macos/WSLZeroTrust.app
 ```
 
 The Mac needs the WireGuard tools and a bash new enough to run `wg-quick`:
