@@ -1,3 +1,9 @@
+> [!WARNING]
+> **This repository is no longer maintained.** WSL Zero Trust VPN has been rebranded as **VPN10x** and is now developed in the TenthMatrix monorepo: [`bwalia/tenthmatrix/products/vpn10x`](https://github.com/bwalia/tenthmatrix/tree/main/products/vpn10x).
+>
+> TenthMatrix: [www.tenthmatrix.com/en/products/](https://www.tenthmatrix.com/en/products/)
+> Please open new issues and pull requests in the monorepo.
+
 # WSL Zero Trust VPN
 
 Lightweight, self-hosted, WireGuard-based Zero Trust access.
