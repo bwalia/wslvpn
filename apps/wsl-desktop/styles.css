@@ -112,6 +112,15 @@ code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .dot.up { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 
 .toolbar { display: flex; border-top: 1px solid var(--card-border); padding: 6px; gap: 4px; }
+.sponsor {
+  margin: 0;
+  padding: 6px 12px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--card-border);
+}
+.sponsor a { color: var(--muted); }
+.sponsor a:hover { color: var(--fg); }
 .tool {
   width: 30px;
   height: 24px;

@@ -50,6 +50,8 @@
   }
   a { color: var(--accent); }
   footer { color: var(--muted); font-size: 0.875rem; margin-top: 28px; }
+  footer a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+  footer a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -84,7 +86,8 @@ wsl connect --network &lt;network&gt;</pre></li>
     not admitted, ask them to add you.</p>
   </section>
 
-  <footer>{{name}} · version {{version}}</footer>
+  <footer>{{name}} · version {{version}} · Sponsored by
+    <a href="https://www.workstation.co.uk/en" rel="noopener noreferrer">Workstation</a></footer>
 </main>
 </body>
 </html>
