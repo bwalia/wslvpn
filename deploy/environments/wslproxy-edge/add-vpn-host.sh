@@ -4,7 +4,7 @@
 # k3s1's ingress the way the other k3s1 sites are, with an auto-renewing
 # Let's Encrypt certificate.
 #
-# DNS already points the name at the edge (CNAME -> lon1.pop0.uk); this adds
+# DNS already points the name at the edge (CNAME -> edge.pop0.uk); this adds
 # the edge's side. It follows wslproxy's own workflow — pull the LIVE config,
 # edit, push as a dry run to show the diff, then push for real — so the rule
 # edit is made to what is actually deployed, not to a stale copy.
@@ -37,13 +37,16 @@ echo "==> upstream: $(jq -r '.name + " -> " + ([.match.response.backends[].addre
 server="$work/servers/$PROFILE/host:$HOST.json"
 conf=$(printf '\nserver {\n      listen 80;\n      server_name %s;\n      root /var/www/html;\n      index index.html;\n      access_log logs/%s.access.log;\n      error_log logs/%s.error.log;\n}\n' "$HOST" "$HOST" "$HOST" | base64 | tr -d '\n')
 # Same shape as the other k3s1 hosts (e.g. acc-grafana.diytaxreturn.co.uk).
+# dns_cname_target: edge.pop0.uk is the lon1<->lon2 failover switch; see
+# diy-tax-return-infra docs/runbooks/edge-failover.md. (WireGuard/UDP does not
+# use this name; it goes to the hub endpoint in wslproxy-pop1/gateway.yaml.)
 jq -n --arg h "$HOST" --arg p "$PROFILE" --arg r "$RULE_ID" --arg e "$SSL_EMAIL" --arg c "$conf" '{
   id: ("host:" + $h), profile_id: $p, server_name: $h, proxy_server_name: $h,
   proxy_pass: "http://localhost", listens: [{listen: "80"}], root: "/var/www/html",
   index: "index.html", config: $c, config_status: true, rules: [$r],
   match_cases: {}, custom_headers: {}, cache_enabled: false,
   access_log: ("logs/" + $h + ".access.log"), error_log: ("logs/" + $h + ".error.log"),
-  dns_record_type: "CNAME", dns_cname_target: "lon1.pop0.uk",
+  dns_record_type: "CNAME", dns_cname_target: "edge.pop0.uk",
   ssl_enabled: true, ssl_force_https: true, ssl_auto_renew: true, ssl_staging: false,
   ssl_email: $e
 }' > "$server"
